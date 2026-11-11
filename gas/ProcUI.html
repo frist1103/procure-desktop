@@ -1,0 +1,1216 @@
+<script>
+/* ProcUI — หน้างานจัดซื้อ (เฟส 2): รายการงาน + ฟอร์ม 5 ขั้น
+ * ใช้เครื่องมือจาก Client (window.App) และข้อมูลอ้างอิงที่แคชไว้ในเครื่องสำหรับช่องค้นหา */
+(function () {
+  'use strict';
+  var A = window.App, $ = A.$, esc = A.esc, run = A.run, toast = A.toast;
+  var META = null, LIST = null, LISTFY = '', FILTER = 'active', QUERY = '';
+  var E = null; // งานที่เปิดอยู่
+
+  // ================================================================ เครื่องมือ
+  var MONF = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
+  var DOW = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์'];
+  function ref(t) { return A.rowsOf(A.S.ref[t]); }
+  function cfg() { return A.S.ref.config || {}; }
+  function canWrite() { return A.has('officer') || A.has('head') || A.has('admin'); }
+  function nz(v) { return !(v === null || v === undefined || String(v).trim() === ''); }
+  function num(v) { var n = Number(String(v === undefined || v === null ? '' : v).replace(/,/g, '')); return isNaN(n) ? 0 : n; }
+  function r2(n) { return Math.round((Number(n) + Number.EPSILON) * 100) / 100; }
+  function money(n) { var x = r2(n).toFixed(2).split('.'); return x[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',') + '.' + x[1]; }
+  function iso(d) { return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
+  function parseIso(s) { var m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; }
+  function addDays(s, n) { var d = parseIso(s); if (!d) return ''; d.setDate(d.getDate() + Number(n)); return iso(d); }
+  function thDate(s, withDow) {
+    var d = parseIso(s); if (!d) return '';
+    return (withDow ? 'วัน' + DOW[d.getDay()] + 'ที่ ' : '') + d.getDate() + ' ' + MONF[d.getMonth()] + ' ' + (d.getFullYear() + 543);
+  }
+  function fyOf(s) { var d = parseIso(s); return d ? d.getFullYear() + 543 + (d.getMonth() >= 9 ? 1 : 0) : ''; }
+  function quarterOf(s) { var d = parseIso(s); if (!d) return ''; var m = d.getMonth() + 1; return m >= 10 ? 1 : (m <= 3 ? 2 : (m <= 6 ? 3 : 4)); }
+  var TN = ['', 'หนึ่ง', 'สอง', 'สาม', 'สี่', 'ห้า', 'หก', 'เจ็ด', 'แปด', 'เก้า'], TP = ['', 'สิบ', 'ร้อย', 'พัน', 'หมื่น', 'แสน'];
+  function grp(n, hi) {
+    var s = String(n), o = '';
+    for (var i = 0; i < s.length; i++) {
+      var d = +s.charAt(i), p = s.length - i - 1;
+      if (!d) continue;
+      if (p === 1 && d === 1) o += 'สิบ'; else if (p === 1 && d === 2) o += 'ยี่สิบ';
+      else if (p === 0 && d === 1 && (s.length > 1 || hi)) o += 'เอ็ด'; else o += TN[d] + TP[p];
+    }
+    return o;
+  }
+  function readNum(n) { n = Math.floor(n); if (!n) return 'ศูนย์'; var mi = Math.floor(n / 1e6), r = n % 1e6; return (mi ? readNum(mi) + 'ล้าน' : '') + (r ? grp(r, mi > 0) : ''); }
+  function bahtText(a) {
+    var v = r2(a); if (!v) return 'ศูนย์บาทถ้วน';
+    var b = Math.floor(v), s = Math.round((v - b) * 100);
+    return (b ? readNum(b) + 'บาท' : '') + (s ? readNum(s) + 'สตางค์' : 'ถ้วน');
+  }
+  function stChip(st) { return '<span class="st st-' + esc(st) + '">' + esc((META && META.status[st]) || st) + '</span>'; }
+  function docNo(p) { return p.proc_no ? p.proc_no + '/' + p.fiscal_year : ''; }
+  function personName(id) { var p = ref('personnel').filter(function (x) { return x.person_id === id; })[0]; return p ? p.full_name : ''; }
+  function shortDept(n) { return String(n || '').replace(/^กลุ่มบริหารงาน|^กลุ่มสาระการเรียนรู้/, '').trim(); }
+  function personPos(id) { var p = ref('personnel').filter(function (x) { return x.person_id === id; })[0]; return p ? (p.position_title || p.staff_type || '') : ''; }
+
+  // ---------- กล่องโต้ตอบ (แทน alert/confirm ของเบราว์เซอร์) ----------
+  function modal(o) {
+    return new Promise(function (resolve) {
+      var bg = document.createElement('div');
+      bg.className = 'modal-bg';
+      bg.innerHTML = '<div class="modal' + (o.wide ? ' wide' : '') + '" role="dialog" aria-modal="true"><h3>' + esc(o.title) + '</h3><div class="body">' + (o.html || '') +
+        '</div><div class="merr" role="alert" hidden></div><div class="btns">' + (o.buttons || [{ label: 'ตกลง', value: true, cls: 'primary' }]).map(function (b, i) {
+          return '<button class="btn ' + (b.cls || '') + '" data-i="' + i + '">' + esc(b.label) + '</button>';
+        }).join('') + '</div></div>';
+      document.body.appendChild(bg);
+      var working = false;
+      var close = function (v) { document.removeEventListener('keydown', key); bg.remove(); resolve(v); };
+      var key = function (e) { if (e.key === 'Escape' && !working) close(null); };
+      document.addEventListener('keydown', key);
+      var btns = function (on) { Array.prototype.forEach.call(bg.querySelectorAll('.btns button'), function (x) { x.disabled = !on; }); };
+      bg.addEventListener('click', function (e) {
+        if (working) return;
+        // กล่องที่มีช่องกรอก: คลิกนอกกล่องไม่ปิด (กันข้อมูลที่พิมพ์หาย)
+        if (e.target === bg) { if (!o.collect) close(null); return; }
+        var b = e.target.closest('.btns button'); if (!b) return;
+        var def = (o.buttons || [{ value: true }])[Number(b.getAttribute('data-i'))];
+        var val = def.value;
+        if (o.collect && val) {
+          modalErr(bg, '');
+          var c = o.collect(bg);
+          if (c && typeof c.then === 'function') {
+            // บันทึกแบบรอผล: กล่องเปิดค้างจนบันทึกสำเร็จ ถ้าไม่สำเร็จแสดงข้อความในกล่อง ข้อมูลไม่หาย
+            working = true; btns(false); b.setAttribute('data-label', b.textContent); b.textContent = 'กำลังบันทึก…';
+            c.then(function (r) {
+              working = false; btns(true); b.textContent = b.getAttribute('data-label');
+              if (r !== false) close(r === undefined ? val : r);
+            }, function (err) {
+              working = false; btns(true); b.textContent = b.getAttribute('data-label');
+              modalErr(bg, err && err.message ? err.message : String(err));
+            });
+            return;
+          }
+          if (c === false) return;
+          val = c === undefined ? val : c;
+        }
+        close(val);
+      });
+      if (o.onOpen) o.onOpen(bg);
+      var f = bg.querySelector('input,textarea,select,.btns .primary'); if (f) f.focus();
+    });
+  }
+  /** ข้อความผิดพลาดในกล่องโต้ตอบ (ว่าง = ซ่อน) */
+  function modalErr(bg, msg) {
+    var el = bg.querySelector('.merr'); if (!el) return;
+    el.textContent = msg || ''; el.hidden = !msg;
+    if (msg) el.scrollIntoView({ block: 'nearest' });
+  }
+  var busyEl = null;
+  function busyOn(msg, sub) {
+    busyOff();
+    busyEl = document.createElement('div'); busyEl.className = 'busy-bg';
+    busyEl.innerHTML = '<div><div class="spinner" style="margin:auto"></div><div class="msg">' + esc(msg) + '</div><div class="sub">' + esc(sub || '') + '</div></div>';
+    document.body.appendChild(busyEl);
+  }
+  function busyOff() { if (busyEl) { busyEl.remove(); busyEl = null; } }
+
+  // ---------- ช่องค้นหา (พิมพ์แล้วเลือก) ----------
+  function combo(input, o) {
+    var wrap = input.parentNode;
+    if (!wrap.classList.contains('combo')) { var w = document.createElement('div'); w.className = 'combo'; input.parentNode.insertBefore(w, input); w.appendChild(input); wrap = w; }
+    var list = null, hits = [], cur = -1;
+    function hide() { if (list) { list.remove(); list = null; } cur = -1; }
+    function show() {
+      var q = input.value.trim().toLowerCase();
+      var words = q.split(/\s+/).filter(String);
+      // จัดลำดับ: ชื่อที่ขึ้นต้นด้วยคำค้นมาก่อน แล้วตามตำแหน่งที่พบ
+      hits = o.source().map(function (it) {
+        var name = o.text(it).toLowerCase();
+        var hay = (name + ' ' + (o.sub ? o.sub(it) : '') + ' ' + (o.extra ? o.extra(it) : '')).toLowerCase();
+        if (!words.every(function (w) { return hay.indexOf(w) >= 0; })) return null;
+        var p = words.length ? name.indexOf(words[0]) : 0;
+        return { it: it, s: p < 0 ? 999 : p };
+      }).filter(Boolean).sort(function (a, b) { return a.s - b.s; }).slice(0, 8).map(function (x) { return x.it; });
+      if (!hits.length && o.hideEmpty) { hide(); return; }
+      if (!list) { list = document.createElement('div'); list.className = 'combo-list'; wrap.appendChild(list); }
+      list.innerHTML = hits.length ? hits.map(function (it, i) {
+        return '<div data-i="' + i + '"' + (i === cur ? ' class="on"' : '') + '>' + esc(o.text(it)) + (o.sub ? '<small>' + esc(o.sub(it)) + '</small>' : '') + '</div>';
+      }).join('') : '<div class="none">' + esc(o.empty || 'ไม่พบ — พิมพ์ต่อได้เลย') + '</div>';
+    }
+    function pick(i) { var it = hits[i]; if (!it) return; hide(); o.onPick(it); }
+    input.setAttribute('autocomplete', 'off');
+    input.addEventListener('focus', function () { if (!input.readOnly && !input.disabled) show(); });
+    input.addEventListener('input', function () { cur = -1; show(); });
+    input.addEventListener('blur', function () { setTimeout(hide, 150); });
+    input.addEventListener('keydown', function (e) {
+      if (!list) return;
+      if (e.key === 'ArrowDown') { cur = Math.min(cur + 1, hits.length - 1); show(); e.preventDefault(); }
+      else if (e.key === 'ArrowUp') { cur = Math.max(cur - 1, 0); show(); e.preventDefault(); }
+      else if (e.key === 'Enter' && cur >= 0) { pick(cur); e.preventDefault(); }
+      else if (e.key === 'Escape') hide();
+    });
+    wrap.addEventListener('mousedown', function (e) { var d = e.target.closest('.combo-list [data-i]'); if (d) { e.preventDefault(); pick(Number(d.getAttribute('data-i'))); } });
+  }
+
+  // ================================================================ หน้ารายการงาน
+  // ---------- เก็บข้อมูลไว้ในเครื่อง (เฉพาะเจ้าหน้าที่) เพื่อเปิดได้ทันที แล้วค่อยตรวจกับเซิร์ฟเวอร์เบื้องหลัง ----------
+  var idb = A.idb;
+  function keep() { return canWrite(); }
+  function metaOk() { return !!META && (!A.S.appVersion || META.version === A.S.appVersion); }
+  function ensureMeta() {
+    if (metaOk()) return Promise.resolve(META);
+    return run('apiProcMeta').then(function (m) { META = m; if (keep()) idb.set('proc:meta', m); return m; });
+  }
+  function cacheJob(J) {
+    if (!keep() || !J || J.isNew || !J.data.proc.proc_id) return;
+    if (J.dirty || J.stale) return; // เก็บเฉพาะข้อมูลที่ตรงกับเซิร์ฟเวอร์
+    var id = J.data.proc.proc_id;
+    idb.set('proc:job:' + id, { data: J.data, docs: J.docs, canEdit: J.canEdit, canVoid: J.canVoid, folderUrl: J.folderUrl, rev: J.base, at: Date.now() });
+    idb.get('proc:jobs').then(function (ids) {
+      ids = (ids || []).filter(function (x) { return x !== id; }); ids.unshift(id);
+      ids.slice(40).forEach(function (x) { idb.del('proc:job:' + x); }); // เก็บล่าสุด 40 งาน
+      idb.set('proc:jobs', ids.slice(0, 40));
+    });
+  }
+  function cacheList() { if (keep() && LIST) idb.set('proc:list', LIST); }
+  function clearLocal() {
+    return idb.get('proc:jobs').then(function (ids) {
+      (ids || []).forEach(function (x) { idb.del('proc:job:' + x); });
+      ['proc:jobs', 'proc:list', 'proc:meta'].forEach(function (k) { idb.del(k); });
+    });
+  }
+  function show() {
+    var root = $('page-proc');
+    if (!root.innerHTML.trim()) root.innerHTML = '<div id="proc-list"></div><div id="proc-ed" hidden></div>';
+    if (E) { $('proc-list').hidden = true; $('proc-ed').hidden = false; return; }
+    $('proc-list').hidden = false; $('proc-ed').hidden = true;
+    LISTFY = LISTFY || String(cfg().fiscal_year_current || '');
+    if (LIST && META) { renderList(); refreshList(); return; }
+    $('proc-list').innerHTML = '<div class="loading"><div class="spinner"></div><div>กำลังโหลดรายการงาน…</div></div>';
+    (keep() ? Promise.all([idb.get('proc:list'), META ? META : idb.get('proc:meta')]) : Promise.resolve([null, null])).then(function (c) {
+      if (!LIST && c[0] && c[0].rows) LIST = c[0];
+      if (!META && c[1] && c[1].steps) META = c[1];
+      if (LIST && META && !E) renderList();
+      refreshList();
+    });
+  }
+  /** โหลดรายการจากเซิร์ฟเวอร์ (พร้อมกฎของระบบถ้ายังไม่มี) แล้ววาดใหม่เฉพาะเมื่อข้อมูลเปลี่ยน */
+  var listBusy = null;
+  function refreshList() {
+    if (listBusy) return listBusy;
+    var shown = !!(LIST && META);
+    if (shown) setListNote('กำลังอัปเดต…');
+    listBusy = run('apiProcList', '', { meta: !metaOk() }).then(function (d) {
+      listBusy = null;
+      if (d.meta) { META = d.meta; if (keep()) idb.set('proc:meta', d.meta); }
+      delete d.meta;
+      var changed = JSON.stringify(d) !== JSON.stringify(LIST);
+      LIST = d; cacheList();
+      if (!E && $('proc-list') && !$('proc-list').hidden && (changed || !shown)) renderList(); else setListNote('');
+    }).catch(function (e) {
+      listBusy = null;
+      if (!shown && !E) $('proc-list').innerHTML = '<div class="banner bad">' + esc(e.message) + '</div>';
+      else { setListNote('อัปเดตไม่สำเร็จ — แสดงข้อมูลที่เก็บไว้'); toast(e.message, true); }
+    });
+    return listBusy;
+  }
+  function setListNote(t) { var el = $('p-note'); if (el) el.textContent = t; }
+  /** แก้แถวในรายการทันทีหลังบันทึก (ไม่ต้องโหลดรายการใหม่) */
+  function patchList(J) {
+    if (!LIST) return;
+    var P = J.data.proc, v = J.data.vendor;
+    var row = { proc_id: P.proc_id, fiscal_year: P.fiscal_year, proc_no: P.proc_no, status: P.status, subject: P.subject,
+      vendor: v ? v.vendor_name + (v.branch ? ' สาขา ' + v.branch : '') : '', total_amount: P.total_amount, request_date: P.request_date,
+      tor_memo_date: P.tor_memo_date, updated_at: P.updated_at, updated_by: P.updated_by, folder_id: P.folder_id };
+    LIST.rows = LIST.rows.filter(function (r) { return r.proc_id !== row.proc_id; });
+    LIST.rows.unshift(row);
+    cacheList();
+  }
+  var FILTERS = [['active', 'กำลังดำเนินการ'], ['draft', 'ร่าง'], ['done', 'เสร็จแล้ว'], ['void', 'ยกเลิก'], ['all', 'ทั้งหมด']];
+  function filterRow(r) {
+    if (FILTER === 'active') return ['requested', 'ordered', 'inspected', 'draft'].indexOf(r.status) >= 0;
+    if (FILTER === 'done') return r.status === 'issued';
+    if (FILTER === 'all') return true;
+    return r.status === FILTER;
+  }
+  var filterAuto = true;
+  function renderList() {
+    var rows = LIST.rows.filter(function (r) { return !LISTFY || String(r.fiscal_year) === LISTFY || r.status === 'draft'; });
+    // เปิดครั้งแรก: ถ้าไม่มีงานที่กำลังดำเนินการ ให้แสดงทั้งหมดแทนหน้าว่าง
+    if (filterAuto) { filterAuto = false; if (FILTER === 'active' && rows.length && !rows.filter(filterRow).length) FILTER = 'all'; }
+    var q = QUERY.trim().toLowerCase();
+    var shown = rows.filter(filterRow).filter(function (r) {
+      return !q || [r.subject, r.vendor, docNo(r), r.proc_id].join(' ').toLowerCase().indexOf(q) >= 0;
+    });
+    var fys = {}; LIST.rows.forEach(function (r) { if (r.fiscal_year) fys[r.fiscal_year] = 1; }); fys[cfg().fiscal_year_current] = 1;
+    var cnt = function (f) { var keep = FILTER; FILTER = f; var n = rows.filter(filterRow).length; FILTER = keep; return n; };
+    var html = '<div class="p-head"><h2>งานจัดซื้อ</h2>' +
+      (LIST.canCreate ? '<button class="btn primary" id="p-new">＋ สร้างงานใหม่</button>' : '') + '</div>' +
+      '<div class="p-tools"><input class="search" id="p-q" type="search" placeholder="ค้นหา: ชื่องาน ผู้ขาย หรือเลขที่" value="' + esc(QUERY) + '">' +
+      '<select id="p-fy" aria-label="ปีงบประมาณ">' + Object.keys(fys).sort().reverse().map(function (y) {
+        return '<option value="' + esc(y) + '"' + (String(y) === LISTFY ? ' selected' : '') + '>ปีงบประมาณ ' + esc(y) + '</option>';
+      }).join('') + '</select></div>' +
+      '<div class="p-tools" id="p-filters">' + FILTERS.map(function (f) {
+        return '<button class="chipbtn' + (FILTER === f[0] ? ' on' : '') + '" data-f="' + f[0] + '">' + esc(f[1]) + '<span class="cnt">' + cnt(f[0]) + '</span></button>';
+      }).join('') + '</div>';
+    if (!shown.length) {
+      html += '<div class="p-empty"><div class="big">📄</div><p>' + (rows.length ? 'ไม่พบงานที่ตรงกับตัวกรองนี้' : 'ยังไม่มีงานจัดซื้อในปีนี้') + '</p>' +
+        (LIST.canCreate ? '<p>กด <b>＋ สร้างงานใหม่</b> เพื่อเริ่มงานแรก ระบบจะพาไปทีละขั้น</p>' : '') + '</div>';
+    } else {
+      html += '<div class="p-list">' + shown.map(function (r) {
+        var idx = META.statusOrder.indexOf(r.status);
+        var dots = '<span class="dots" title="ความคืบหน้า">' + [0, 1, 2, 3, 4].map(function (i) { return '<i class="' + (r.status !== 'void' && i <= idx ? 'on' : '') + '"></i>'; }).join('') + '</span>';
+        return '<div class="p-card" tabindex="0" data-id="' + esc(r.proc_id) + '"><div><div>' + stChip(r.status) + ' <span class="m">' +
+          (docNo(r) ? 'เลขที่ ' + esc(docNo(r)) : 'ยังไม่มีเลขที่') + '</span></div><div class="t">' + esc(r.subject || '(ยังไม่ได้ตั้งชื่องาน)') + '</div>' +
+          '<div class="m">' + esc(r.vendor || 'ยังไม่ได้เลือกผู้ขาย') + '</div></div>' +
+          '<div class="r"><div class="amt">' + (num(r.total_amount) ? money(r.total_amount) + ' ฿' : '—') + '</div><div>' + dots + '</div>' +
+          '<div class="m">แก้ล่าสุด ' + esc(String(r.updated_at || '').slice(0, 16)) + '</div></div></div>';
+      }).join('') + '</div>';
+    }
+    html += '<div class="p-foot muted small"><span id="p-note">' + (listBusy ? 'กำลังอัปเดต…' : '') + '</span>' +
+      (keep() ? ' <span>ข้อมูลงานถูกเก็บไว้ในเครื่องนี้เพื่อให้เปิดได้เร็ว · <a href="#" id="p-clear">ล้างข้อมูลในเครื่องนี้</a></span>' : '') + '</div>';
+    var hadFocus = document.activeElement && document.activeElement.id === 'p-q', selS = hadFocus ? document.activeElement.selectionStart : 0;
+    $('proc-list').innerHTML = html;
+    if (hadFocus) { var qi = $('p-q'); qi.focus(); qi.setSelectionRange(selS, selS); }
+    if ($('p-clear')) $('p-clear').onclick = function (e) {
+      e.preventDefault();
+      clearLocal().then(function () { toast('ล้างข้อมูลงานที่เก็บในเครื่องนี้แล้ว'); });
+    };
+    if ($('p-new')) $('p-new').onclick = function () { newJob(); };
+    var qt; $('p-q').oninput = function () { var v = this.value; clearTimeout(qt); qt = setTimeout(function () { QUERY = v; renderList(); var i = $('p-q'); i.focus(); i.setSelectionRange(v.length, v.length); }, 200); };
+    $('p-fy').onchange = function () { LISTFY = this.value; renderList(); };
+    $('p-filters').onclick = function (e) { var b = e.target.closest('[data-f]'); if (b) { FILTER = b.getAttribute('data-f'); renderList(); } };
+    var open = function (e) { var c = e.target.closest('.p-card'); if (c) openJob(c.getAttribute('data-id')); };
+    $('proc-list').querySelector('.p-list') && ($('proc-list').querySelector('.p-list').onclick = open);
+    $('proc-list').onkeydown = function (e) { if (e.key === 'Enter' && e.target.classList.contains('p-card')) open(e); };
+  }
+
+  // ================================================================ งาน: โหลด/สร้าง/แปลงข้อมูล
+  var TOR_ROLES = ['ประธานกรรมการ', 'กรรมการ', 'กรรมการและเลขานุการ'];
+  var IC_ROLES = ['ประธานกรรมการ', 'กรรมการ', 'กรรมการและเลขานุการ'];
+  var PRICE_SOURCES = ['การสืบราคาจากท้องตลาด /จากเว็บไซต์', 'ราคามาตรฐาน', 'ราคาที่ได้จากฐานข้อมูลราคาอ้างอิงของพัสดุ', 'ราคาที่เคยซื้อหรือจ้างครั้งหลังสุดภายใน 2 ปีงบประมาณ'];
+  var UNITS = ['ชุด', 'เครื่อง', 'อัน', 'ชิ้น', 'ตัว', 'กล่อง', 'รีม', 'แพ็ค', 'ม้วน', 'ด้าม', 'เล่ม', 'แผ่น', 'ถุง', 'ขวด', 'คัน', 'หลัง', 'งาน'];
+
+  /** วันที่เสนอ (ตามระยะห่างงานโดรน) */
+  var DATE_PLAN = [['tor_order_date', 0], ['request_date', 1], ['result_date', 2], ['inspect_order_date', 2], ['announce_date', 2],
+    ['contract_notice_date', 2], ['po_date', 3]];
+  function suggestDates(p, overwrite) {
+    var base = p.tor_memo_date; if (!base) return 0;
+    var n = 0;
+    DATE_PLAN.forEach(function (d) { if (overwrite || !p[d[0]]) { p[d[0]] = addDays(base, d[1]); n++; } });
+    if (overwrite || !p.inspection_date) { p.inspection_date = addDays(p.po_date, 7); n++; }
+    if (overwrite || !p.issue_date) { p.issue_date = p.inspection_date; n++; }
+    return n;
+  }
+
+  function blankJob() {
+    var c = cfg(), today = iso(new Date());
+    var p = {
+      proc_id: '', status: 'draft', subject: '', subject_short: '', reason: '', project_name: '', admin_group: '', responsible_unit: '', dept: '',
+      budget_type: 'เงินนอกงบประมาณ', budget_source: '', budget_year: String(c.fiscal_year_current || fyOf(today)), budget_amount: '', ref_price: '',
+      price_source: PRICE_SOURCES[0], vat_mode: 'include', vendor_id: '',
+      delivery_days: c.default_delivery_days || '15', price_validity_days: c.default_price_validity_days || '15',
+      contract_sign_days: c.default_contract_sign_days || '7', repair_days: c.default_repair_days || '7', warranty_years: '1',
+      tor_memo_date: today, tor_order_no: '', item_mode: 'set', po_line_desc: '', po_line_qty: '1', po_line_unit: 'ชุด',
+      egp_project_no: '', egp_project_name: '', egp_contract_no: '', egp_inspect_no: '', requester_id: '', issue_quarter: '', issue_doc_no: ''
+    };
+    suggestDates(p, true);
+    return {
+      proc: p, items: [blankItem()], specs: { background: [''], objective: [''], spec_title: '', spec: [''] },
+      committees: { TOR: ['', '', ''], INSPECT: ['', '', ''] }, quote: { offered_price: '', agreed_price: '' }, vendor: null
+    };
+  }
+  function blankItem() { return { description: '', qty: '1', unit: '', unit_price: '', std_price: '', item_code: '', post_to_ledger: 'Y', is_asset: 'N', brand: '', model: '', buy_note: '' }; }
+
+  /** ข้อมูลจากเซิร์ฟเวอร์ → รูปแบบฟอร์ม */
+  function fromServer(d) {
+    var specs = { background: [], objective: [], spec_title: '', spec: [] };
+    (d.specs || []).slice().sort(function (a, b) { return num(a.line_no) - num(b.line_no); }).forEach(function (s) {
+      if (s.section === 'spec_title') specs.spec_title = s.text; else if (specs[s.section]) specs[s.section].push(s.text);
+    });
+    ['background', 'objective', 'spec'].forEach(function (k) { if (!specs[k].length) specs[k].push(''); });
+    var cm = { TOR: ['', '', ''], INSPECT: ['', '', ''] };
+    (d.committees || []).forEach(function (c) { if (cm[c.kind] && c.seq >= 1 && c.seq <= 3) cm[c.kind][c.seq - 1] = c.person_id; });
+    var q = (d.quotes || [])[0] || {};
+    var p = {}; Object.keys(d.proc).forEach(function (k) { p[k] = d.proc[k] === null || d.proc[k] === undefined ? '' : String(d.proc[k]); });
+    // วันที่: ใช้เฉพาะ yyyy-MM-dd (ช่องวันที่ของเบราว์เซอร์ไม่รับค่าที่มีเวลา)
+    Object.keys(p).forEach(function (k) { if (/_date$/.test(k) && /^\d{4}-\d{2}-\d{2}/.test(p[k])) p[k] = p[k].substring(0, 10); });
+    return {
+      proc: p,
+      items: (d.items && d.items.length ? d.items : [blankItem()]).slice().sort(function (a, b) { return num(a.line_no) - num(b.line_no); }).map(function (i) {
+        return { description: i.description, qty: String(i.qty), unit: i.unit, unit_price: String(i.unit_price), std_price: i.std_price === '' || i.std_price === undefined ? '' : String(i.std_price),
+          item_code: i.item_code || '', post_to_ledger: i.post_to_ledger || 'Y', is_asset: i.is_asset || 'N',
+          brand: i.brand || '', model: i.model || '', buy_note: i.buy_note || '' };
+      }),
+      specs: specs, committees: cm, quote: { offered_price: q.offered_price || '', agreed_price: q.agreed_price || '' }, vendor: d.vendor || null
+    };
+  }
+  /** แบบฟอร์ม → ข้อมูลส่งเซิร์ฟเวอร์ */
+  function toPayload() {
+    var D = E.data, specs = [];
+    ['background', 'objective', 'spec'].forEach(function (k) { D.specs[k].forEach(function (t, i) { if (nz(t)) specs.push({ section: k, line_no: i + 1, text: t }); }); });
+    if (nz(D.specs.spec_title)) specs.push({ section: 'spec_title', line_no: 1, text: D.specs.spec_title });
+    var cm = [];
+    ['TOR', 'INSPECT'].forEach(function (k) { D.committees[k].forEach(function (pid, i) { if (pid) cm.push({ kind: k, seq: i + 1, person_id: pid, role_label: (k === 'TOR' ? TOR_ROLES : IC_ROLES)[i] }); }); });
+    var total = itemsTotal();
+    var quotes = D.proc.vendor_id ? [{ seq: 1, vendor_id: D.proc.vendor_id, offered_price: D.quote.offered_price || total, agreed_price: D.quote.agreed_price || total }] : [];
+    return { proc: D.proc, items: D.items.filter(function (i) { return nz(i.description); }), specs: specs, committees: cm, quotes: quotes,
+      baseRev: E.base, changed: Object.keys(E.changed) };
+  }
+  function itemsTotal() { return r2(E.data.items.reduce(function (s, i) { return s + num(i.qty) * num(i.unit_price); }, 0)); }
+
+  // ---------- ตรวจความพร้อม (กฎเดียวกับเซิร์ฟเวอร์ จาก apiProcMeta) ----------
+  function missing(forms) {
+    var pl = toPayload(), P = pl.proc, out = [], seen = {};
+    var cm = function (k) { return E.data.committees[k].every(nz); };
+    var sp = function (s) { return pl.specs.some(function (x) { return x.section === s; }); };
+    var special = {
+      '@tor3': function () { return cm('TOR'); }, '@ic3': function () { return cm('INSPECT'); },
+      '@items': function () { return pl.items.length && pl.items.every(function (i) { return nz(i.description) && num(i.qty) > 0 && nz(i.unit_price) && nz(i.unit); }); },
+      '@vendor': function () { return nz(P.vendor_id) && E.data.vendor; },
+      '@bg': function () { return sp('background'); }, '@obj': function () { return sp('objective'); }, '@spec': function () { return sp('spec'); },
+      '@proc_no': function () { return nz(P.proc_no); }, '@inspect_no': function () { return nz(P.inspect_order_no); }
+    };
+    forms.forEach(function (f) {
+      (META.rules[f] || []).forEach(function (r) {
+        var ok, key, label, step;
+        if (r.charAt(0) === '@') { ok = special[r](); key = r; label = META.special[r][0]; step = META.special[r][1]; }
+        else { var x = r.split('|'); key = x[0]; label = x[1]; step = Number(x[2]); ok = nz(P[key]); }
+        if (!ok && !seen[key]) { seen[key] = 1; out.push({ form: f, key: key, label: label, step: step }); }
+      });
+    });
+    return out;
+  }
+  function stepDef(n) { return META.steps.filter(function (s) { return s.step === n; })[0]; }
+  function reqKeys(step) {
+    var keys = {};
+    stepDef(step).forms.forEach(function (f) { (META.rules[f] || []).forEach(function (r) { keys[r.split('|')[0]] = 1; }); });
+    // ช่องของขั้นอื่นที่เอกสารขั้นนี้ใช้ ก็ถือว่าต้องกรอก
+    PROC_ALL_FORMS().forEach(function (f) { (META.rules[f] || []).forEach(function (r) { var x = r.split('|'); if (x[2] && Number(x[2]) === step) keys[x[0]] = 1; }); });
+    return keys;
+  }
+  function PROC_ALL_FORMS() { var a = []; META.steps.forEach(function (s) { a = a.concat(s.forms); }); return a; }
+
+  // ================================================================ เปิด/สร้างงาน
+  function newJob() {
+    if (!canWrite()) { toast('บทบาทของคุณดูได้อย่างเดียว', true); return; }
+    if (!HIST) loadHist();
+    ensureMeta().then(function () {
+      E = { data: blankJob(), step: 1, base: '', dirty: false, changed: {}, docs: {}, log: null, canEdit: true, canVoid: false, folderUrl: '', isNew: true, ver: 0 };
+      renderEditor();
+      toast('เริ่มงานใหม่ — ระบบเสนอวันที่ให้แล้ว แก้ได้ทุกช่อง');
+    });
+  }
+  function stepFor(proc, items, keepStep) {
+    var st = proc.status, idx = META.statusOrder.indexOf(st);
+    var step = keepStep || (st === 'void' ? 1 : Math.min(5, Math.max(1, idx + 2 > 5 ? 5 : idx + 2)));
+    if (st === 'draft') step = keepStep || (proc.request_date && (items || []).filter(function (i) { return nz(i.description); }).length ? 2 : 1);
+    return step;
+  }
+  /**
+   * เปิดงาน: ถ้ามีข้อมูลที่เก็บไว้ในเครื่อง แสดงทันที (ล็อกปุ่มบันทึกไว้ชั่วครู่) แล้วตรวจกับเซิร์ฟเวอร์
+   * เปิดงาน + ราคาล่าสุด + กฎของระบบ ในคำสั่งเดียว
+   */
+  var openSeq = 0;
+  function openJob(id, keepStep) {
+    var seq = ++openSeq;
+    var fromCache = keep() ? idb.get('proc:job:' + id) : Promise.resolve(null);
+    fromCache.then(function (c) {
+      if (seq !== openSeq) return;
+      if (c && c.data && metaOk()) {
+        E = { data: c.data, step: stepFor(c.data.proc, c.data.items, keepStep), base: String(c.rev || '0'), dirty: false, changed: {}, docs: c.docs || {}, log: null,
+          canEdit: c.canEdit, canVoid: c.canVoid, folderUrl: c.folderUrl, isNew: false, ver: 0, stale: true };
+        renderEditor();
+      } else busyOn('กำลังเปิดงาน…');
+      return run('apiProcGet', id, { log: false, hist: !HIST, meta: !metaOk() }).then(function (d) {
+        busyOff();
+        if (seq !== openSeq) return;
+        if (d.meta) { META = d.meta; if (keep()) idb.set('proc:meta', d.meta); }
+        if (d.hist) HIST = d.hist;
+        var fresh = { data: fromServer(d), docs: d.docs || {}, canEdit: d.canEdit, canVoid: d.canVoid, folderUrl: d.folderUrl, rev: String(d.proc.rev || '0') };
+        var cur = E && E.data.proc.proc_id === id && E.stale ? E : null;
+        if (cur && cur.base === fresh.rev) {
+          // ข้อมูลในเครื่องตรงกับเซิร์ฟเวอร์ — ปลดล็อก ไม่ต้องวาดใหม่
+          cur.stale = false; cur.docs = fresh.docs; cur.canEdit = fresh.canEdit; cur.canVoid = fresh.canVoid; cur.folderUrl = fresh.folderUrl;
+          renderTop(); renderAct(); renderSide(); cacheJob(cur);
+          if (cur.step === 5) { var v0 = cur.ver; step5Defaults(); if (cur.ver !== v0) renderStep(); }
+        } else if (cur && cur.dirty) {
+          // มีคนแก้ระหว่างเปิด และผู้ใช้เริ่มพิมพ์แล้ว — ไม่ทับสิ่งที่พิมพ์ ให้เลือกเอง
+          cur.stale = false; renderAct();
+          modal({ title: 'งานนี้มีข้อมูลใหม่กว่าที่เห็น', html: '<p>มีการแก้งานนี้ (โดย ' + esc(d.proc.updated_by || 'ผู้ใช้อื่น') + ' เมื่อ ' + esc(String(d.proc.updated_at || '').slice(0, 16)) +
+            ') หลังจากที่เครื่องนี้เก็บไว้ ถ้าบันทึกตอนนี้ระบบจะไม่ยอมให้เขียนทับ</p>',
+            buttons: [{ label: 'แก้ต่อ (บันทึกไม่ได้)', value: false }, { label: 'โหลดข้อมูลล่าสุด', value: true, cls: 'primary' }] })
+            .then(function (v) { if (v) { cur.dirty = false; idb.del('proc:job:' + id); openJob(id, cur.step); } });
+        } else {
+          var step = cur ? cur.step : stepFor(fresh.data.proc, fresh.data.items, keepStep);
+          var y = window.scrollY;
+          E = { data: fresh.data, step: step, base: fresh.rev, dirty: false, changed: {}, docs: fresh.docs, log: null,
+            canEdit: fresh.canEdit, canVoid: fresh.canVoid, folderUrl: fresh.folderUrl, isNew: false, ver: 0 };
+          renderEditor();
+          if (cur) window.scrollTo(0, y);
+          cacheJob(E);
+        }
+      });
+    }).catch(function (e) {
+      busyOff(); toast(e.message, true);
+      if (E && E.stale && seq === openSeq) { E.stale = false; E.canEdit = false; renderEditor(); toast('ตรวจข้อมูลล่าสุดไม่ได้ — แสดงแบบดูอย่างเดียว', true); }
+    });
+  }
+  function leave() {
+    var go = function () { E = null; show(); };
+    if (E && E.dirty) {
+      modal({ title: 'ยังไม่ได้บันทึก', html: '<p>มีการแก้ไขที่ยังไม่บันทึก ต้องการทำอย่างไร?</p>',
+        buttons: [{ label: 'กลับไปแก้ต่อ', value: null }, { label: 'ออกโดยไม่บันทึก', value: 'discard', cls: 'danger' }, { label: 'บันทึกแล้วออก', value: 'save', cls: 'primary' }] })
+        .then(function (v) { if (v === 'discard') go(); else if (v === 'save') save().then(function (ok) { if (ok) go(); }); });
+    } else go();
+  }
+  window.addEventListener('beforeunload', function (e) { if (E && (E.dirty || E.saving)) { e.preventDefault(); e.returnValue = ''; } });
+
+  // ================================================================ วาดหน้าแก้ไข
+  function renderEditor() {
+    $('proc-list').hidden = true; $('proc-ed').hidden = false;
+    var P = E.data.proc, ro = !E.canEdit;
+    var stIdx = META.statusOrder.indexOf(P.status);
+    var html = '<div id="ed-topwrap"></div>';
+    if (P.status === 'void') html += '<div class="banner bad"><b>งานนี้ถูกยกเลิก</b> — เหตุผล: ' + esc(P.void_reason) + '</div>';
+    else if (ro && canWrite()) html += '<div class="banner warn">งานสถานะ "' + esc(META.status[P.status]) + '" แก้ไขได้เฉพาะหัวหน้าเจ้าหน้าที่หรือผู้ดูแลระบบ — ดูและออกเอกสารซ้ำได้</div>';
+    else if (ro) html += '<div class="banner info">โหมดดูอย่างเดียว</div>';
+    html += '<div class="stepper" id="ed-steps">' + META.steps.map(function (s) {
+      var done = P.status !== 'void' && (s.confirmTo ? META.statusOrder.indexOf(s.confirmTo) <= stIdx : (stIdx >= 1));
+      return '<button class="' + (done ? 'done ' : '') + (s.step === E.step ? 'cur' : '') + '" data-step="' + s.step + '" aria-current="' + (s.step === E.step ? 'step' : 'false') +
+        '"><span class="c">' + (done ? '✓' : s.step) + '</span><span class="l">' + esc(s.name) + '</span></button>';
+    }).join('') + '</div>';
+    html += '<div class="ed-grid"><div id="ed-body"></div><div class="side" id="ed-side"></div></div><div class="actbar" id="ed-act"></div>';
+    $('proc-ed').innerHTML = html;
+    renderTop();
+    $('ed-steps').onclick = function (e) { var b = e.target.closest('[data-step]'); if (b) gotoStep(Number(b.getAttribute('data-step'))); };
+    renderStep();
+  }
+  /** ส่วนหัวของงาน (ชื่อ สถานะ เลขที่ ปุ่ม) — วาดใหม่ได้โดยไม่กระทบช่องที่กำลังกรอก */
+  function renderTop() {
+    var w = $('ed-topwrap'); if (!w || !E) return;
+    var P = E.data.proc, ro = !E.canEdit;
+    w.innerHTML = '<div class="ed-top"><button class="btn ghost" id="ed-back">← รายการงาน</button><div class="ed-title"><h2 id="ed-h">' +
+      esc(P.subject || 'งานจัดซื้อใหม่') + '</h2><div class="m">' + stChip(P.status) + ' ' +
+      (docNo(P) ? 'เลขที่ <b>' + esc(docNo(P)) + '</b>' : (E.isNew ? 'ยังไม่ได้บันทึก' : 'รหัสงาน ' + esc(P.proc_id) + ' · เลขที่จะออกเมื่อยืนยันขอซื้อ')) +
+      (P.inspect_order_no ? ' · คำสั่งตรวจรับ พ ' + esc(P.inspect_order_no) : '') + '</div></div>' +
+      (E.folderUrl ? '<a class="btn small" target="_blank" href="' + esc(E.folderUrl) + '">📁 โฟลเดอร์เอกสาร</a>' : '') +
+      (!E.isNew && canWrite() && !ro ? '<button class="btn small" id="ed-copy">คัดลอกจากงานเดิม</button>' : (E.isNew ? '<button class="btn small" id="ed-copy">คัดลอกจากงานเดิม</button>' : '')) +
+      (!E.isNew ? '<button class="btn small" id="ed-log">ประวัติ</button>' : '') +
+      (E.canVoid ? '<button class="btn small danger" id="ed-void">ยกเลิกงาน</button>' : '') + '</div>';
+    $('ed-back').onclick = leave;
+    if ($('ed-copy')) $('ed-copy').onclick = copyFromJob;
+    if ($('ed-log')) $('ed-log').onclick = showLog;
+    if ($('ed-void')) $('ed-void').onclick = voidJob;
+  }
+  function gotoStep(n) {
+    E.step = n;
+    Array.prototype.forEach.call($('ed-steps').querySelectorAll('button'), function (b) { b.classList.toggle('cur', Number(b.getAttribute('data-step')) === n); });
+    renderStep();
+    window.scrollTo({ top: $('proc-ed').offsetTop - 10, behavior: 'smooth' });
+  }
+
+  // ---------- ตัวช่วยสร้างช่องกรอก ----------
+  var REQ = {};
+  function lab(k, label, help) {
+    return '<label for="f-' + k + '">' + esc(label) + (REQ[k] ? '<span class="req" title="จำเป็นสำหรับเอกสารขั้นนี้">*</span>' : '') + '</label>' + (help ? '<span class="help">' + esc(help) + '</span>' : '');
+  }
+  function val(k) { var v = E.data.proc[k]; return v === null || v === undefined ? '' : v; }
+  function dis() { return E.canEdit ? '' : ' disabled'; }
+  function fText(k, label, o) {
+    o = o || {};
+    return '<div class="fld' + (o.wide ? ' wide' : '') + '">' + lab(k, label, o.help) + '<input class="p-in' + (o.num ? ' num' : '') + '" id="f-' + k + '" data-k="' + k + '"' +
+      (o.num ? ' inputmode="decimal"' : '') + ' placeholder="' + esc(o.ph || '') + '" value="' + esc(val(k)) + '"' + dis() + (o.ro ? ' readonly' : '') + '>' +
+      (o.after || '') + '</div>';
+  }
+  function fArea(k, label, o) {
+    o = o || {};
+    return '<div class="fld wide">' + lab(k, label, o.help) + '<textarea class="p-in" id="f-' + k + '" data-k="' + k + '" placeholder="' + esc(o.ph || '') + '"' + dis() + '>' +
+      esc(val(k)) + '</textarea></div>';
+  }
+  function fDate(k, label, o) {
+    o = o || {};
+    return '<div class="fld">' + lab(k, label, o.help) + '<input class="p-in" type="date" id="f-' + k + '" data-k="' + k + '" value="' + esc(val(k)) + '"' + dis() + '>' +
+      '<span class="thd" data-thd="' + k + '">' + esc(thDate(val(k), true)) + '</span></div>';
+  }
+  function fRadio(k, label, opts, o) {
+    o = o || {};
+    return '<div class="fld' + (o.wide ? ' wide' : '') + '"><span class="lb">' + esc(label) + (REQ[k] ? '<span class="req">*</span>' : '') + '</span>' +
+      (o.help ? '<span class="help">' + esc(o.help) + '</span>' : '') + '<div class="radio-row">' + opts.map(function (op) {
+        var v = op[0], on = String(val(k)) === String(v);
+        return '<label class="' + (on ? 'on' : '') + '"><input type="radio" name="r-' + k + '" data-k="' + k + '" value="' + esc(v) + '"' + (on ? ' checked' : '') + dis() + '> ' + esc(op[1]) + '</label>';
+      }).join('') + '</div></div>';
+  }
+  function sec(title, hint, inner, id) {
+    return '<section class="sec"' + (id ? ' id="' + id + '"' : '') + '><h3>' + title + '</h3>' + (hint ? '<p class="hint">' + esc(hint) + '</p>' : '') + inner + '</section>';
+  }
+  function slots(kind, roles) {
+    return E.data.committees[kind].map(function (pid, i) {
+      return '<div class="slot"><div><div class="role">' + (i + 1) + '. ' + esc(roles[i]) + (REQ[kind === 'TOR' ? '@tor3' : '@ic3'] ? '<span class="req" style="color:var(--bad)">*</span>' : '') +
+        '</div></div><div><input class="p-in person" data-cm="' + kind + '" data-i="' + i + '" placeholder="พิมพ์ชื่อหรือนามสกุล แล้วเลือก" value="' + esc(personName(pid)) + '"' + dis() + '>' +
+        '<div class="who" data-who="' + kind + i + '">' + (pid ? '✓ ' + esc(personPos(pid)) : '') + '</div></div></div>';
+    }).join('');
+  }
+  function plist(key, label, ph, rows) {
+    return '<div class="plist" data-plist="' + key + '">' + E.data.specs[key].map(function (t, i) {
+      return '<div class="prow"><div class="n">' + (key === 'objective' ? '2.' + (i + 1) : (i + 1) + '.') + '</div><textarea class="p-in" rows="' + (rows || 3) + '" data-sp="' + key + '" data-i="' + i +
+        '" placeholder="' + esc(ph) + '"' + dis() + '>' + esc(t) + '</textarea>' + (E.canEdit && E.data.specs[key].length > 1 ? '<button class="rm" data-sprm="' + key + '" data-i="' + i + '" title="ลบ">×</button>' : '<span></span>') + '</div>';
+    }).join('') + (E.canEdit ? '<button class="btn small addbtn" data-spadd="' + key + '">＋ เพิ่ม' + esc(label) + '</button>' : '') + '</div>';
+  }
+
+  // ---------- แต่ละขั้น ----------
+  function autoGrow(el) { el.style.height = 'auto'; el.style.height = (el.scrollHeight + 2) + 'px'; }
+  /** ขั้นเบิก: ช่องว่าง → ผู้เบิก = ประธานกรรมการตรวจรับ, กลุ่มงาน = หน่วยงานรับผิดชอบ (แก้ได้) */
+  function step5Defaults() {
+    // เติมเฉพาะงานที่ยังไม่ปิด (งานที่เบิกแล้ว/ยกเลิก เปิดดูแล้วต้องไม่กลายเป็น "มีการแก้ไข")
+    if (!E.canEdit || E.stale || ['issued', 'void'].indexOf(E.data.proc.status) >= 0) return; // ข้อมูลในเครื่องรอตรวจ → เติมหลังได้ข้อมูลล่าสุด
+    var P = E.data.proc, said = [];
+    var chair = E.data.committees.INSPECT[0];
+    if (!nz(P.requester_id) && chair) { setP('requester_id', chair); said.push('ผู้เบิก = ประธานกรรมการตรวจรับ'); }
+    var unit = P.responsible_unit || P.admin_group;
+    if (!nz(P.dept) && nz(unit)) { setP('dept', shortDept(unit)); said.push('กลุ่มงาน = หน่วยงานรับผิดชอบ'); }
+    if (!nz(P.issue_quarter) && P.issue_date) { var q = quarterOf(P.issue_date); if (q) setP('issue_quarter', String(q)); }
+    if (said.length) toast('เติมให้จากขั้นก่อนหน้า: ' + said.join(', ') + ' — แก้ได้');
+  }
+
+  function renderStep() {
+    if (E.step === 5) step5Defaults();
+    REQ = reqKeys(E.step);
+    var h = [step1, step2, step3, step4, step5][E.step - 1]();
+    $('ed-body').innerHTML = h;
+    Array.prototype.forEach.call($('ed-body').querySelectorAll('textarea'), autoGrow);
+    bindStep();
+    refreshComputed();
+    renderSide();
+    renderAct();
+  }
+
+  // ---------- คำนำหน้าที่ซ้ำกับเอกสาร ("ซื้อ…", "โครงการ…") ----------
+  var LEAD_WORD = { subject: 'ซื้อ', subject_short: 'ซื้อ', project_name: 'โครงการ' };
+  function leadBad(k) { var v = String(val(k) || '').trim(); return !!LEAD_WORD[k] && v.indexOf(LEAD_WORD[k]) === 0 && v.length > LEAD_WORD[k].length; }
+  function leadWarn(k) {
+    return '<div class="unreg" data-lead="' + k + '"' + (leadBad(k) ? '' : ' hidden') + '><span>เอกสารมีคำว่า "' + LEAD_WORD[k] +
+      '" นำหน้าอยู่แล้ว — ระบบจะตัดออกให้ตอนออกเอกสาร (ลบเองได้)</span></div>';
+  }
+  function updateLead(k) { var el = $('ed-body').querySelector('[data-lead="' + k + '"]'); if (el) el.hidden = !leadBad(k); }
+
+  // ---------- หน่วยงานที่ยังไม่มีในทะเบียน ----------
+  var DEPT_TYPES = ['กลุ่มบริหาร', 'กลุ่มสาระ', 'งาน', 'ฝ่ายบริหาร', 'อื่น ๆ'];
+  function deptKnown(name) { name = String(name || '').trim(); return !name || ref('departments').some(function (d) { return d.dept_name === name; }); }
+  function unregBox(k) { return '<div class="unreg" data-unreg="' + k + '"' + (deptKnown(val(k)) ? ' hidden' : '') + '>' + unregHtml(k) + '</div>'; }
+  function unregHtml(k) {
+    return '<span>ยังไม่มีในทะเบียนหน่วยงาน</span>' + (E.canEdit ? '<button type="button" data-act="adddept" data-k="' + k + '">＋ เพิ่มเข้าทะเบียน</button>' : '');
+  }
+  function updateUnreg(k) { var el = $('ed-body').querySelector('[data-unreg="' + k + '"]'); if (el) el.hidden = deptKnown(val(k)); }
+  function addDeptForm(k) {
+    var name = String(val(k)).trim();
+    var guess = k === 'admin_group' ? 'กลุ่มบริหาร' : (/^กลุ่มสาระ/.test(name) ? 'กลุ่มสาระ' : (/^งาน/.test(name) ? 'งาน' : (/^กลุ่มบริหาร/.test(name) ? 'กลุ่มบริหาร' : 'อื่น ๆ')));
+    modal({ title: 'เพิ่มหน่วยงานเข้าทะเบียน',
+      html: '<div class="fg"><div class="fld wide"><label>ชื่อหน่วยงาน<span class="req">*</span></label><input class="p-in" id="nd-name" value="' + esc(name) + '"></div>' +
+        '<div class="fld"><label>ประเภท</label><select class="p-in" id="nd-type">' + DEPT_TYPES.map(function (t) { return '<option' + (t === guess ? ' selected' : '') + '>' + esc(t) + '</option>'; }).join('') + '</select></div></div>' +
+        '<p class="muted small">เพิ่มแล้วจะเลือกได้ทุกงาน ผู้ดูแลระบบแก้ไขหรือปิดใช้ได้ในชีต Department</p>',
+      buttons: [{ label: 'ยกเลิก', value: false }, { label: 'เพิ่มเข้าทะเบียน', value: true, cls: 'primary' }],
+      collect: function (bg) {
+        var n = bg.querySelector('#nd-name').value.trim();
+        if (!n) { modalErr(bg, 'กรุณากรอกชื่อหน่วยงาน'); return false; }
+        return run('apiProcAddDepartment', { dept_name: n, dept_type: bg.querySelector('#nd-type').value });
+      }
+    }).then(function (row) {
+      if (!row || row === true) return;
+      var t = A.S.ref.departments;
+      if (t && !ref('departments').some(function (d) { return d.dept_id === row.dept_id; })) t.rows.push(t.cols.map(function (c) { return row[c] === undefined ? '' : row[c]; }));
+      setP(k, row.dept_name);
+      var el = $('f-' + k); if (el) el.value = row.dept_name;
+      updateUnreg(k); renderSide();
+      toast(row.existed ? 'มี "' + row.dept_name + '" ในทะเบียนอยู่แล้ว (' + row.dept_id + ')' : 'เพิ่ม "' + row.dept_name + '" เข้าทะเบียนแล้ว (' + row.dept_id + ')');
+    });
+  }
+
+  function step1() {
+    return sec('📝 ข้อมูลงาน', 'ชื่องานจะถูกใช้ในทุกเอกสาร พิมพ์ครั้งเดียวพอ',
+      '<div class="fg">' + fText('subject', 'ชื่อพัสดุ/งานที่จะซื้อ', { wide: true, ph: 'เช่น อากาศยานซึ่งไม่มีนักบิน (โดรน)', help: 'ไม่ต้องพิมพ์คำว่า "ซื้อ" นำหน้า', after: leadWarn('subject') }) +
+      fText('subject_short', 'ชื่อแบบสั้น (ใช้ในคำสั่งและ TOR)', { help: 'เว้นว่างได้ — ระบบจะใช้ชื่อเต็ม', ph: 'เช่น อากาศยานซึ่งไม่มีนักบิน', after: leadWarn('subject_short') }) +
+      fText('project_name', 'ชื่อโครงการ', { ph: 'พิมพ์เพื่อค้นหาโครงการ', help: 'ไม่ต้องพิมพ์คำว่า "โครงการ" นำหน้า', after: leadWarn('project_name') }) +
+      fArea('reason', 'เหตุผลความจำเป็นที่ต้องซื้อ', { ph: 'เช่น ใช้ในการจัดการเรียนการสอนสำหรับห้องเรียนเตรียมวิศวะ' }) +
+      fText('admin_group', 'กลุ่มบริหารที่รับผิดชอบ', { ph: 'พิมพ์หรือเลือก เช่น กลุ่มบริหารงานวิชาการ', after: unregBox('admin_group') }) +
+      fText('responsible_unit', 'หน่วยงานรับผิดชอบ (ท้าย TOR)', { ph: 'พิมพ์เพื่อค้นหา หรือพิมพ์ชื่อใหม่', after: unregBox('responsible_unit') }) + '</div>') +
+      sec('💰 งบประมาณ', '',
+        '<div class="fg">' + fRadio('budget_type', 'ประเภทเงิน', [['เงินงบประมาณ', 'เงินงบประมาณ'], ['เงินนอกงบประมาณ', 'เงินนอกงบประมาณ']]) +
+        fText('budget_source', 'แหล่งงบประมาณ', { ph: 'เช่น เงินบำรุงการศึกษา (ห้องเรียนวิทย์คอม)' }) +
+        fText('budget_year', 'ปีงบประมาณของแหล่งเงิน', { num: true, help: 'ปี พ.ศ. ที่ได้รับเงิน (อาจต่างจากปีที่ซื้อ)' }) +
+        fText('budget_amount', 'วงเงินงบประมาณ (บาท)', { num: true, ph: '0.00', after: '<span class="thd" data-baht="budget_amount"></span>' }) + '</div>') +
+      sec('📅 วันที่และเลขที่ขั้น TOR', 'เปลี่ยนวันที่บันทึกขอแต่งตั้งแล้ว ระบบจะเสนอวันที่ของขั้นอื่นให้อัตโนมัติ (เฉพาะช่องที่ยังว่าง)',
+        '<div class="fg">' + fDate('tor_memo_date', 'วันที่บันทึกขอแต่งตั้ง TOR') +
+        fText('tor_order_no', 'เลขที่คำสั่งแต่งตั้ง TOR', { ph: 'เช่น 486', help: 'กรอกเอง จากทะเบียนคำสั่งของโรงเรียน' }) +
+        fDate('tor_order_date', 'วันที่ลงคำสั่ง TOR') + '</div>' +
+        (E.canEdit ? '<div style="margin-top:10px"><button class="btn small" data-act="redate">↻ เสนอวันที่ทุกขั้นใหม่จากวันที่บันทึก</button></div>' : '')) +
+      sec('👥 ผู้กำหนดขอบเขตของงาน (TOR) และราคาอ้างอิง', 'พิมพ์ชื่อหรือนามสกุล 2–3 ตัวอักษร แล้วเลือกจากรายการ ตำแหน่งจะดึงจากทะเบียนบุคลากร', slots('TOR', TOR_ROLES), 'sec-tor3') +
+      sec('📄 ข้อความใน TOR', 'กด "คัดลอกจากงานเดิม" ด้านบน เพื่อดึงข้อความจากงานที่คล้ายกันมาแก้ได้',
+        '<div class="fld wide" id="sec-bg"><span class="lb">1. ความเป็นมา' + (REQ['@bg'] ? '<span class="req">*</span>' : '') + '</span>' + plist('background', 'ย่อหน้า', 'ย่อหน้าความเป็นมา', 4) + '</div>' +
+        '<div class="fld wide" id="sec-obj" style="margin-top:14px"><span class="lb">2. วัตถุประสงค์' + (REQ['@obj'] ? '<span class="req">*</span>' : '') + '</span>' + plist('objective', 'ข้อ', 'เพื่อ…', 2) + '</div>' +
+        '<div class="fg" style="margin-top:14px"><div class="fld wide"><label for="f-spec_title">หัวข้อรายละเอียดงาน (หน้าแนบท้าย TOR)</label><span class="help">เว้นว่างได้ — ระบบใช้ชื่องาน</span>' +
+        '<input class="p-in" id="f-spec_title" data-spt="1" placeholder="เช่น อากาศยานซึ่งไม่มีนักบิน (Drone) DJI Neo 2 Motion Fly More Combo" value="' + esc(E.data.specs.spec_title) + '"' + dis() + '></div></div>' +
+        '<div class="fld wide" id="sec-spec" style="margin-top:14px"><span class="lb">รายละเอียดคุณลักษณะ' + (REQ['@spec'] ? '<span class="req">*</span>' : '') + '</span>' + plist('spec', 'บรรทัด', 'เช่น ความละเอียดวิดีโอ 4K 60 Fps', 2) + '</div>') +
+      sec('⚖️ เงื่อนไขใน TOR', 'ค่าเริ่มต้นมาจาก ตั้งค่า → ค่าระบบ',
+        '<div class="fg">' + fText('price_validity_days', 'ยืนราคาไม่น้อยกว่า (วัน)', { num: true }) + fText('delivery_days', 'กำหนดส่งมอบภายใน (วัน)', { num: true }) +
+        fText('warranty_years', 'รับประกันความชำรุดบกพร่อง (ปี)', { num: true }) + fText('repair_days', 'ซ่อมแซมให้ใช้การได้ภายใน (วัน)', { num: true }) +
+        fRadio('price_source', 'ที่มาของราคากลาง', PRICE_SOURCES.map(function (s) { return [s, s]; }), { wide: true }) + '</div>');
+  }
+
+  function step2() {
+    var P = E.data.proc, total = itemsTotal();
+    var items = '<div class="items" id="sec-items">' + E.data.items.map(function (it, i) {
+      return '<div class="item"><div class="no">' + (i + 1) + '.</div>' +
+        '<div class="fld d"><span class="lbl">รายละเอียดพัสดุ</span><input class="p-in item-desc" data-it="' + i + '" data-ik="description" placeholder="พิมพ์ชื่อพัสดุ (ระบบเสนอจากทะเบียน)" value="' + esc(it.description) + '"' + dis() + '>' +
+        (it.item_code ? '<span class="picked">✓ รหัสพัสดุ ' + esc(it.item_code) + '</span>' : '') + '</div>' +
+        (E.canEdit && E.data.items.length > 1 ? '<button class="rm" data-itrm="' + i + '" title="ลบรายการนี้">×</button>' : '<span></span>') +
+        '<div class="fld q"><span class="lbl">จำนวน</span><input class="p-in num" inputmode="decimal" data-it="' + i + '" data-ik="qty" value="' + esc(it.qty) + '"' + dis() + '></div>' +
+        '<div class="fld u"><span class="lbl">หน่วย</span><input class="p-in item-unit" data-it="' + i + '" data-ik="unit" placeholder="ชุด" value="' + esc(it.unit) + '"' + dis() + '></div>' +
+        '<div class="fld p"><span class="lbl">ราคาต่อหน่วย (บาท)</span><input class="p-in num" inputmode="decimal" data-it="' + i + '" data-ik="unit_price" value="' + esc(it.unit_price) + '"' + dis() + '></div>' +
+        '<div class="fld s"><span class="lbl">ราคากลาง/มาตรฐาน ต่อหน่วย</span><input class="p-in num" inputmode="decimal" data-it="' + i + '" data-ik="std_price" placeholder="= ราคาต่อหน่วย" value="' + esc(it.std_price) + '"' + dis() + '></div>' +
+        '<div class="amt" data-amt="' + i + '">' + money(num(it.qty) * num(it.unit_price)) + '</div><span></span>' +
+        '<div class="hint" data-hint="' + i + '"' + (it._hint ? '' : ' hidden') + '>' + esc(it._hint || '') + '</div>' +
+        '<div class="buy"><span class="cap">🛒 ข้อมูลสำหรับผู้ไปซื้อ — เก็บในฐานข้อมูล ไม่พิมพ์ลงเอกสาร</span>' +
+        '<div class="fld"><span class="lbl">ยี่ห้อ</span><input class="p-in item-brand" data-it="' + i + '" data-ik="brand" placeholder="เช่น Double A" value="' + esc(it.brand) + '"' + dis() + '></div>' +
+        '<div class="fld"><span class="lbl">รุ่น / สเปกเพิ่มเติม</span><input class="p-in" data-it="' + i + '" data-ik="model" placeholder="เช่น 80 แกรม สีขาว" value="' + esc(it.model) + '"' + dis() + '></div>' +
+        '<div class="fld"><span class="lbl">หมายเหตุสำหรับผู้ซื้อ</span><input class="p-in" data-it="' + i + '" data-ik="buy_note" placeholder="เช่น ยี่ห้อใดก็ได้ / ร้านเดิม" value="' + esc(it.buy_note) + '"' + dis() + '></div></div>' +
+        '<div class="flags"><label><input type="checkbox" data-it="' + i + '" data-ik="post_to_ledger"' + (it.post_to_ledger === 'N' ? ' checked' : '') + dis() +
+        '> ไม่ต้องลงคลัง <span class="muted">(เช่น ค่าบริการ ค่าประกัน)</span></label>' +
+        '<label><input type="checkbox" data-it="' + i + '" data-ik="is_asset"' + (it.is_asset === 'Y' ? ' checked' : '') + dis() + '> เป็นครุภัณฑ์</label></div></div>';
+    }).join('') + '</div>' + (E.canEdit ? '<button class="btn small addbtn" data-act="additem" style="margin-top:10px">＋ เพิ่มรายการ</button>' : '') +
+      '<div class="totals"><div>รวมเป็นเงินทั้งสิ้น <b id="tot">' + money(total) + '</b> บาท</div><div class="txt" id="tot-t">(' + esc(bahtText(total)) + ')</div>' +
+      '<div class="txt" id="tot-v"></div></div>';
+    var v = E.data.vendor;
+    var vend = '<div class="fg"><div class="fld wide">' + lab('vendor_id', 'ผู้ขาย') + '<input class="p-in" id="f-vendor" placeholder="พิมพ์ชื่อร้าน/บริษัท แล้วเลือก" value="' +
+      esc(v ? v.vendor_name + (v.branch ? ' สาขา ' + v.branch : '') : '') + '"' + dis() + '></div></div>' +
+      (v ? '<div class="vcard" style="margin-top:10px"><b>' + esc(v.vendor_name) + (v.branch ? ' สาขา ' + esc(v.branch) : '') + '</b><span>' +
+        esc([v.address, v.subdistrict ? 'ตำบล' + v.subdistrict : '', v.district ? 'อำเภอ' + v.district : '', v.province ? 'จังหวัด' + v.province : '', v.postcode].filter(String).join(' ') || 'ยังไม่มีที่อยู่') +
+        '</span><span class="muted">โทร ' + esc(v.phone || '-') + ' · เลขผู้เสียภาษี ' + esc(v.tax_id || '-') + '</span></div>' : '') +
+      (E.canEdit ? '<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn small" data-act="newvendor">＋ เพิ่มผู้ขายรายใหม่</button>' +
+        (v ? '<button class="btn small" data-act="editvendor">แก้ไขข้อมูลผู้ขาย</button>' : '') + '</div>' : '') +
+      '<div class="fg" style="margin-top:12px"><div class="fld"><label for="f-q-off">ราคาที่เสนอ (บาท)</label><span class="help">เว้นว่าง = เท่ากับยอดรวม</span><input class="p-in num" id="f-q-off" data-q="offered_price" inputmode="decimal" placeholder="' + money(total) + '" value="' + esc(E.data.quote.offered_price) + '"' + dis() + '></div>' +
+      '<div class="fld"><label for="f-q-agr">ราคาที่ตกลงซื้อ (บาท)</label><span class="help">เว้นว่าง = เท่ากับยอดรวม</span><input class="p-in num" id="f-q-agr" data-q="agreed_price" inputmode="decimal" placeholder="' + money(total) + '" value="' + esc(E.data.quote.agreed_price) + '"' + dis() + '></div></div>';
+    return sec('📅 รายงานขอซื้อ', '', '<div class="fg">' + fDate('request_date', 'วันที่รายงานขอซื้อ', { help: 'วันที่นี้กำหนดปีงบประมาณของเลขที่ขอซื้อ' }) + '</div>') +
+      sec('📦 รายการพัสดุ', 'พิมพ์ชื่อ ระบบจะเสนอชื่อจากทะเบียนพัสดุเดิม (เลือกหรือพิมพ์ใหม่ก็ได้) · ยอดเงินคำนวณให้อัตโนมัติ (ราคารวมภาษีมูลค่าเพิ่ม)', items, 'sec-items-wrap') +
+      sec('🏷️ ราคากลาง', '', '<div class="fg">' + fText('ref_price', 'ราคากลาง (บาท)', { num: true, ph: money(total), help: 'เว้นว่าง = เท่ากับยอดรวม', after: '<span class="thd" data-baht="ref_price"></span>' }) +
+        fRadio('price_source', 'ที่มาของราคากลาง', PRICE_SOURCES.map(function (s) { return [s, s]; }), { wide: true }) + '</div>') +
+      sec('🏪 ผู้ขายและราคาที่เสนอ', '', vend, 'sec-vendor');
+  }
+
+  function step3() {
+    var P = E.data.proc;
+    return sec('📅 วันที่ขั้นอนุมัติและสั่งซื้อ', 'ระบบเสนอให้ตามระยะปกติ แก้ได้ทุกช่อง',
+      '<div class="fg">' + fDate('result_date', 'รายงานผลการพิจารณา') + fDate('inspect_order_date', 'คำสั่งแต่งตั้งผู้ตรวจรับ') +
+      fDate('announce_date', 'ประกาศผู้ชนะ') + fDate('contract_notice_date', 'หนังสือแจ้งลงนามในสัญญา') + fDate('po_date', 'ใบสั่งซื้อ') +
+      '<div class="fld"><span class="lb">ครบกำหนดส่งมอบ</span><span class="help">คำนวณ = วันที่ใบสั่งซื้อ + กำหนดส่งมอบ ' + esc(val('delivery_days')) + ' วัน</span><div class="p-in" style="background:#f6f7f9" id="due">-</div></div></div>' +
+      (E.canEdit ? '<div style="margin-top:10px"><button class="btn small" data-act="redate">↻ เสนอวันที่ทุกขั้นใหม่จากวันที่บันทึก TOR</button></div>' : '')) +
+      sec('👥 คณะกรรมการตรวจรับพัสดุ', '',
+        (E.canEdit ? '<button class="btn small" data-act="sametor" style="margin-bottom:8px">ใช้ชุดเดียวกับผู้กำหนด TOR</button>' : '') + slots('INSPECT', IC_ROLES), 'sec-ic3') +
+      sec('🧾 ใบสั่งซื้อ', 'เลือกว่าในใบสั่งซื้อและใบเบิก จะแสดงพัสดุแยกทีละรายการ หรือรวมเป็นชุดเดียว',
+        '<div class="fg">' + fRadio('item_mode', 'รูปแบบรายการในใบสั่งซื้อ/ใบเบิก', [['set', 'รวมเป็นชุด (1 บรรทัด)'], ['split', 'แยกรายการตามแนบท้าย']], { wide: true }) +
+        (P.item_mode !== 'split' ? fText('po_line_desc', 'ชื่อรายการในใบสั่งซื้อ', { ph: P.subject || 'เว้นว่าง = ใช้ชื่องาน', help: 'เว้นว่าง = ใช้ชื่องาน' }) +
+          fText('po_line_qty', 'จำนวน', { num: true }) + fText('po_line_unit', 'หน่วย', { ph: 'ชุด' }) : '') +
+        fText('contract_sign_days', 'ให้มาทำสัญญาภายใน (วัน)', { num: true }) + '</div>') +
+      sec('🌐 เลขจากระบบ e-GP', 'กรอกเมื่อได้เลขจาก e-GP (กลับมากรอกทีหลังได้)',
+        '<div class="fg">' + fText('egp_project_no', 'เลขที่โครงการ', { ph: '11 หลัก', num: false }) + fText('egp_contract_no', 'เลขคุมสัญญา', { ph: '12 หลัก' }) +
+        fText('egp_project_name', 'ชื่อโครงการใน e-GP', { wide: true, ph: 'เว้นว่าง = "ซื้อ' + (P.subject || '…') + ' จำนวน n รายการ"' }) + '</div>');
+  }
+
+  function step4() {
+    return sec('✅ ตรวจรับพัสดุ', 'บันทึกวันที่คณะกรรมการตรวจรับจริง (ระบบเสนอไว้ล่วงหน้า ตรวจสอบให้ตรงวันจริง)',
+      '<div class="fg">' + fDate('inspection_date', 'วันที่ตรวจรับ') + fText('egp_inspect_no', 'เลขคุมตรวจรับ (e-GP)', { help: 'เว้นว่างได้ — เอกสารจะเป็นเส้นประให้เขียน' }) + '</div>' +
+      '<div class="vcard" style="margin-top:12px"><span>กรรมการตรวจรับ: ' + E.data.committees.INSPECT.map(function (p, i) { return esc((i + 1) + '. ' + (personName(p) || '—')); }).join(' · ') +
+      '</span><span class="muted">แก้รายชื่อได้ที่ขั้นที่ 3</span></div>');
+  }
+
+  function step5() {
+    var depts = ref('departments');
+    return sec('📤 เบิกพัสดุ', '',
+      '<div class="fg">' + fDate('issue_date', 'วันที่เบิก', { help: 'ปกติวันเดียวกับวันตรวจรับ' }) +
+      '<div class="fld">' + lab('requester_id', 'ผู้เบิก') + '<input class="p-in person" id="f-requester" data-req="1" placeholder="พิมพ์ชื่อแล้วเลือก" value="' + esc(personName(val('requester_id'))) + '"' + dis() + '>' +
+      '<div class="who" data-who="req">' + (val('requester_id') ? '✓ ' + esc(personPos(val('requester_id'))) : '') + '</div></div>' +
+      fText('dept', 'กลุ่มงาน/กลุ่มสาระที่เบิก', { ph: 'เช่น วิชาการ' }) +
+      fText('issue_quarter', 'ไตรมาสที่', { num: true, help: 'คำนวณจากวันเบิก (แก้ได้)' }) +
+      fText('issue_doc_no', 'เลขที่ใบเบิก (จ.)', { help: 'เว้นว่างได้ — เฟส 3 ระบบบัญชีจะออกให้' }) + '</div>');
+  }
+
+  // ---------- ราคา/ยี่ห้อล่าสุดจากงานในระบบใหม่ ----------
+  var HIST = null;
+  function loadHist() {
+    return run('apiProcPriceHistory').then(function (h) { HIST = h || {}; }).catch(function () { HIST = HIST || {}; });
+  }
+  function itemKey(s) { return String(s || '').replace(/\s+/g, ' ').trim().toLowerCase(); }
+  function histOf(row) {
+    if (!HIST || !row) return null;
+    var h = (row.item_code && HIST['C:' + row.item_code]) || HIST['N:' + itemKey(row.description)] || null;
+    return h && h.proc_id === E.data.proc.proc_id ? null : h; // ไม่นับงานนี้เอง
+  }
+  /** เติมหน่วย/ราคา/ยี่ห้อล่าสุด เฉพาะช่องที่ว่าง — คืน true ถ้ามีการเติม */
+  function fillFromHistory(row) {
+    var h = histOf(row); if (!h) { row._hint = ''; return false; }
+    var did = false;
+    if (!nz(row.unit) && h.unit) { row.unit = h.unit; did = true; }
+    if (!nz(row.unit_price)) { row.unit_price = String(h.price); did = true; }
+    if (!nz(row.brand) && h.brand) { row.brand = h.brand; did = true; }
+    if (!nz(row.model) && h.model) { row.model = h.model; did = true; }
+    row._hint = 'ราคาล่าสุด ' + money(h.price) + ' บาท' + (h.unit ? '/' + h.unit : '') + (h.brand ? ' · ยี่ห้อ ' + h.brand : '') +
+      (/\//.test(h.job) ? ' · งาน ' : ' · งานร่าง ') + h.job + (h.date ? ' (' + thDate(h.date) + ')' : '') + (did ? ' — เติมให้แล้ว แก้ได้' : '');
+    return did;
+  }
+
+  // ---------- ผูกเหตุการณ์ ----------
+  function bindStep() {
+    var body = $('ed-body');
+    body.oninput = onInput; body.onchange = onInput;
+    body.onclick = onClick;
+    if (!E.canEdit) return;
+    // ช่องค้นหาโครงการ / หน่วยงาน / กลุ่มงาน
+    var pj = $('f-project_name');
+    if (pj) combo(pj, { source: function () { return ref('projects'); }, text: function (p) { return p.project_name; }, sub: function (p) { return [p.dept, p.responsible_unit].filter(String).join(' · '); },
+      onPick: function (p) {
+        setP('project_name', p.project_name); pj.value = p.project_name;
+        if (p.responsible_unit && !val('responsible_unit')) setP('responsible_unit', p.responsible_unit);
+        if (p.budget_source && !val('budget_source')) setP('budget_source', p.budget_source);
+        renderStep();
+      }, empty: 'ไม่พบในทะเบียนโครงการ — พิมพ์ชื่อโครงการได้เลย' });
+    ['admin_group', 'responsible_unit', 'dept'].forEach(function (k) {
+      var el = $('f-' + k); if (!el) return;
+      combo(el, {
+        source: function () { return ref('departments').filter(function (d) { return k !== 'admin_group' || d.dept_type === 'กลุ่มบริหาร'; }); },
+        text: function (d) { return d.dept_name; }, sub: function (d) { return d.dept_type; },
+        onPick: function (d) { setP(k, k === 'dept' ? shortDept(d.dept_name) : d.dept_name); el.value = val(k); updateUnreg(k); renderSide(); },
+        hideEmpty: k !== 'dept', empty: 'ไม่พบ — พิมพ์ได้เลย' });
+    });
+    // บุคคล
+    Array.prototype.forEach.call(body.querySelectorAll('input.person'), function (el) {
+      combo(el, { source: function () { return ref('personnel'); }, text: function (p) { return p.full_name; }, sub: function (p) { return [p.position_title || p.staff_type, p.dept].filter(String).join(' · '); },
+        onPick: function (p) {
+          el.value = p.full_name;
+          if (el.getAttribute('data-req')) { setP('requester_id', p.person_id); body.querySelector('[data-who="req"]').innerHTML = '✓ ' + esc(p.position_title || ''); }
+          else {
+            var k = el.getAttribute('data-cm'), i = Number(el.getAttribute('data-i'));
+            var dup = E.data.committees[k].indexOf(p.person_id);
+            if (dup >= 0 && dup !== i) { toast('คนนี้อยู่ในคณะกรรมการชุดนี้แล้ว', true); el.value = personName(E.data.committees[k][i]); return; }
+            E.data.committees[k][i] = p.person_id; markDirty('กรรมการ');
+            body.querySelector('[data-who="' + k + i + '"]').innerHTML = '✓ ' + esc(p.position_title || '');
+          }
+          renderSide();
+        }, empty: 'ไม่พบชื่อนี้ในทะเบียนบุคลากร' });
+    });
+    // รายการพัสดุ
+    Array.prototype.forEach.call(body.querySelectorAll('.item-desc'), function (el) {
+      var i = Number(el.getAttribute('data-it'));
+      var cats = {}; ref('categories').forEach(function (c) { cats[c.cat_code] = c; });
+      combo(el, { source: function () { return ref('items'); }, text: function (it) { return it.item_name; }, sub: function (it) { return [it.item_code, it.unit, (cats[it.cat_code] || {}).cat_name].filter(String).join(' · '); },
+        onPick: function (it) {
+          var row = E.data.items[i];
+          row.description = it.item_name; row.item_code = it.item_code; if (!row.unit) row.unit = it.unit;
+          var c = cats[it.cat_code]; if (c && /ครุภัณฑ์/.test(String(c.type) + String(c.cat_name))) row.is_asset = 'Y';
+          fillFromHistory(row);
+          markDirty('รายการพัสดุ'); renderStep();
+        }, empty: 'ไม่มีในทะเบียน — ใช้ชื่อที่พิมพ์ได้เลย (เฟส 3 จะถามก่อนเพิ่มเข้าทะเบียน)' });
+    });
+    Array.prototype.forEach.call(body.querySelectorAll('.item-unit'), function (el) {
+      combo(el, { source: function () { return UNITS.map(function (u) { return { u: u }; }); }, text: function (x) { return x.u; },
+        onPick: function (x) { var i = Number(el.getAttribute('data-it')); E.data.items[i].unit = x.u; el.value = x.u; markDirty('รายการพัสดุ'); renderSide(); } });
+    });
+    Array.prototype.forEach.call(body.querySelectorAll('.item-brand'), function (el) {
+      var i = Number(el.getAttribute('data-it'));
+      combo(el, { source: function () { var h = histOf(E.data.items[i]); return (h ? h.brands : []).map(function (b) { return { b: b }; }); }, text: function (x) { return x.b; },
+        onPick: function (x) { E.data.items[i].brand = x.b; el.value = x.b; markDirty('รายการพัสดุ'); }, empty: 'ยังไม่เคยบันทึกยี่ห้อของพัสดุนี้ — พิมพ์ได้เลย' });
+    });
+    // พิมพ์ชื่อเอง (ไม่เลือกจากทะเบียน): ออกจากช่องแล้วลองหาราคาล่าสุดจากชื่อที่ตรงกัน
+    if (!body.__fo) body.addEventListener('focusout', body.__fo = function (e) {
+      var t = e.target; if (!t.classList || !t.classList.contains('item-desc')) return;
+      var row = E.data.items[Number(t.getAttribute('data-it'))];
+      // รอให้การเลือกจากรายการ (ถ้ามี) ทำงานก่อน
+      setTimeout(function () {
+        if (row && !row.item_code && E.data.items.indexOf(row) >= 0 && fillFromHistory(row)) { markDirty('รายการพัสดุ'); renderStep(); }
+      }, 200);
+    });
+    var vf = $('f-vendor');
+    if (vf) combo(vf, { source: function () { return ref('vendors'); }, text: function (v) { return v.vendor_name + (v.branch ? ' สาขา ' + v.branch : ''); },
+      sub: function (v) { return [v.vendor_id, v.province, v.tax_id].filter(String).join(' · '); },
+      onPick: function (v) { E.data.vendor = v; setP('vendor_id', v.vendor_id); renderStep(); }, empty: 'ไม่พบ — กด "เพิ่มผู้ขายรายใหม่"' });
+  }
+  function setP(k, v) { if (E.data.proc[k] !== v) { E.data.proc[k] = v; markDirty(k); } }
+  function markDirty(what) { E.dirty = true; E.changed[what] = 1; E.ver = (E.ver || 0) + 1; renderActState(); }
+
+  var sideTimer;
+  function onInput(e) {
+    var t = e.target, k = t.getAttribute('data-k');
+    // ช่องข้อความรับค่าจาก "input" แล้ว — ข้าม "change" (กันค่าที่เลือกจากรายการถูกทับตอนช่องเดิมหลุดโฟกัส)
+    if (e.type === 'change' && (t.tagName === 'TEXTAREA' || (t.tagName === 'INPUT' && (t.type === 'text' || t.type === 'search')))) return;
+    if (t.tagName === 'TEXTAREA') autoGrow(t);
+    if (k) {
+      if (t.type === 'radio') { if (!t.checked) return; setP(k, t.value); Array.prototype.forEach.call(t.closest('.radio-row').querySelectorAll('label'), function (l) { l.classList.toggle('on', l.contains(t)); });
+        if (k === 'item_mode') renderStep(); }
+      else setP(k, t.value);
+      if (k === 'subject') $('ed-h').textContent = t.value || 'งานจัดซื้อใหม่';
+      if (k === 'admin_group' || k === 'responsible_unit') updateUnreg(k);
+      if (LEAD_WORD[k]) updateLead(k);
+      if (t.type === 'date') {
+        var th = $('ed-body').querySelector('[data-thd="' + k + '"]'); if (th) th.textContent = thDate(t.value, true);
+        if (e.type === 'change') dateEffects(k);
+      }
+    } else if (t.hasAttribute('data-it')) {
+      var i = Number(t.getAttribute('data-it')), ik = t.getAttribute('data-ik');
+      if (t.type === 'checkbox') E.data.items[i][ik] = ik === 'post_to_ledger' ? (t.checked ? 'N' : 'Y') : (t.checked ? 'Y' : 'N');
+      else { E.data.items[i][ik] = t.value; if (ik === 'description') E.data.items[i].item_code = ''; }
+      markDirty('รายการพัสดุ');
+    } else if (t.hasAttribute('data-sp')) {
+      E.data.specs[t.getAttribute('data-sp')][Number(t.getAttribute('data-i'))] = t.value; markDirty('ข้อความ TOR');
+    } else if (t.hasAttribute('data-spt')) { E.data.specs.spec_title = t.value; markDirty('ข้อความ TOR'); }
+    else if (t.hasAttribute('data-q')) { E.data.quote[t.getAttribute('data-q')] = t.value; markDirty('ราคาที่เสนอ'); }
+    else if (t.classList.contains('person') && e.type === 'input') {
+      // พิมพ์ทับชื่อเดิม = ยกเลิกการเลือกจนกว่าจะเลือกใหม่
+      if (t.getAttribute('data-req')) { setP('requester_id', ''); $('ed-body').querySelector('[data-who="req"]').innerHTML = '<span class="notpicked">ยังไม่ได้เลือกจากรายการ</span>'; }
+      else { var ck = t.getAttribute('data-cm'), ci = Number(t.getAttribute('data-i')); E.data.committees[ck][ci] = ''; markDirty('กรรมการ');
+        $('ed-body').querySelector('[data-who="' + ck + ci + '"]').innerHTML = '<span class="notpicked">ยังไม่ได้เลือกจากรายการ</span>'; }
+    } else if (t.id === 'f-vendor' && e.type === 'input') { if (E.data.vendor) { E.data.vendor = null; setP('vendor_id', ''); } }
+    refreshComputed();
+    clearTimeout(sideTimer); sideTimer = setTimeout(renderSide, 300);
+  }
+  function dateEffects(k) {
+    var P = E.data.proc;
+    if (k === 'tor_memo_date') { var n = suggestDates(P, false); if (n) { markDirty('วันที่'); renderStep(); toast('เสนอวันที่ของขั้นอื่นให้ ' + n + ' ช่อง (เฉพาะช่องที่ว่าง)'); } }
+    if (k === 'inspection_date' && P.inspection_date && (!P.issue_date || P.issue_date < P.inspection_date)) { P.issue_date = P.inspection_date; }
+    if (k === 'issue_date') { var q = quarterOf(P.issue_date); if (q) P.issue_quarter = String(q); }
+    if (k === 'request_date' && P.proc_no && String(fyOf(P.request_date)) !== String(P.fiscal_year)) toast('วันที่นี้อยู่คนละปีงบกับเลขที่ ' + docNo(P) + ' ที่ออกไปแล้ว', true);
+  }
+  function onClick(e) {
+    var t = e.target.closest('button'); if (!t) return;
+    var act = t.getAttribute('data-act');
+    if (t.hasAttribute('data-spadd')) { E.data.specs[t.getAttribute('data-spadd')].push(''); markDirty('ข้อความ TOR'); renderStep(); focusLast('[data-sp="' + t.getAttribute('data-spadd') + '"]'); }
+    else if (t.hasAttribute('data-sprm')) { E.data.specs[t.getAttribute('data-sprm')].splice(Number(t.getAttribute('data-i')), 1); markDirty('ข้อความ TOR'); renderStep(); }
+    else if (t.hasAttribute('data-itrm')) { E.data.items.splice(Number(t.getAttribute('data-itrm')), 1); markDirty('รายการพัสดุ'); renderStep(); }
+    else if (act === 'additem') { E.data.items.push(blankItem()); markDirty('รายการพัสดุ'); renderStep(); focusLast('.item-desc'); }
+    else if (act === 'redate') {
+      modal({ title: 'เสนอวันที่ใหม่ทั้งหมด?', html: '<p>ระบบจะคำนวณวันที่ทุกขั้นใหม่จากวันที่บันทึกขอแต่งตั้ง TOR (' + esc(thDate(E.data.proc.tor_memo_date)) +
+        ') และ<b>เขียนทับ</b>วันที่ที่กรอกไว้</p>', buttons: [{ label: 'ยกเลิก', value: false }, { label: 'เสนอวันที่ใหม่', value: true, cls: 'primary' }] })
+        .then(function (ok) { if (ok) { suggestDates(E.data.proc, true); markDirty('วันที่'); renderStep(); toast('เสนอวันที่ใหม่แล้ว'); } });
+    }
+    else if (act === 'sametor') { E.data.committees.INSPECT = E.data.committees.TOR.slice(); markDirty('กรรมการ'); renderStep(); }
+    else if (act === 'adddept') addDeptForm(t.getAttribute('data-k'));
+    else if (act === 'newvendor') vendorForm(null);
+    else if (act === 'editvendor') vendorForm(E.data.vendor);
+  }
+  function focusLast(sel) { var els = $('ed-body').querySelectorAll(sel); if (els.length) els[els.length - 1].focus(); }
+
+  function refreshComputed() {
+    var P = E.data.proc, body = $('ed-body');
+    Array.prototype.forEach.call(body.querySelectorAll('[data-baht]'), function (el) { var v = num(P[el.getAttribute('data-baht')]); el.textContent = v ? money(v) + ' บาท (' + bahtText(v) + ')' : ''; });
+    if ($('tot')) {
+      var t = itemsTotal();
+      E.data.items.forEach(function (it, i) { var a = body.querySelector('[data-amt="' + i + '"]'); if (a) a.textContent = money(num(it.qty) * num(it.unit_price)); });
+      $('tot').textContent = money(t); $('tot-t').textContent = '(' + bahtText(t) + ')';
+      var bv = r2(t * 100 / 107); $('tot-v').textContent = t ? 'ก่อนภาษี ' + money(bv) + ' · ภาษีมูลค่าเพิ่ม 7% ' + money(r2(t - bv)) : '';
+    }
+    if ($('due')) $('due').textContent = P.po_date && nz(P.delivery_days) ? thDate(addDays(P.po_date, num(P.delivery_days)), true) : '-';
+    // ไตรมาส/วันที่ที่ถูกคำนวณ
+    ['issue_quarter', 'issue_date'].forEach(function (k) { var el = $('f-' + k); if (el && document.activeElement !== el && el.value !== val(k)) el.value = val(k); });
+    var th = body.querySelector('[data-thd="issue_date"]'); if (th) th.textContent = thDate(val('issue_date'), true);
+  }
+
+  // ---------- แถบข้าง: ความพร้อมเอกสาร ----------
+  function renderSide() {
+    if (!E || !$('ed-side')) return;
+    var s = stepDef(E.step);
+    var AUTO = { '@proc_no': 'ได้เลขที่ขอซื้อเมื่อกด "ยืนยันขอซื้อ"', '@inspect_no': 'ได้เลขคำสั่งตรวจรับเมื่อกด "ยืนยันสั่งซื้อ"' };
+    var html = '<div class="sec ready" style="margin:0"><h4>เอกสารขั้นนี้</h4>' + s.forms.map(function (f) {
+      var all = missing([f]);
+      var m = all.filter(function (x) { return !AUTO[x.key]; }), wait = all.filter(function (x) { return AUTO[x.key]; });
+      var d = E.docs[f];
+      var name = (A.rowsOf(A.S.ref.forms).filter(function (x) { return x.form_key === f; })[0] || {}).form_name || f;
+      return '<div><div class="f"><span><b>' + f + '</b> ' + esc(name) + '</span>' + (m.length ? '<span class="no">ขาด ' + m.length + '</span>' : (wait.length ? '<span class="muted small">รอเลขที่</span>' : '<span class="ok">✓ พร้อม</span>')) + '</div>' +
+        (m.length ? '<ul>' + m.map(function (x) { return '<li><a data-goto="' + esc(x.key) + '" data-step="' + x.step + '">' + esc(x.label) + (x.step !== E.step ? ' (ขั้นที่ ' + x.step + ')' : '') + '</a></li>'; }).join('') + '</ul>' : '') +
+        (wait.length ? '<div class="muted small">ⓘ ' + esc(wait.map(function (x) { return AUTO[x.key]; }).join(' · ')) + '</div>' : '') +
+        (d ? '<div class="doc muted small">ออกล่าสุด ' + esc(String(d.created_at).slice(0, 16)) + ' · <a target="_blank" href="https://drive.google.com/file/d/' + esc(d.file_id) + '/view">เปิดไฟล์</a></div>' : '') + '</div>';
+    }).join('') + '</div>';
+    html += '<div class="sec" style="margin:0"><h4 style="margin:0 0 6px">ทั้งชุด</h4><p class="muted small" style="margin:0 0 8px">ออกเอกสารทุกแบบที่ข้อมูลครบ พร้อมไฟล์ "ชุดรวม" สำหรับพิมพ์ทีเดียว</p>' +
+      (canWrite() && E.data.proc.status !== 'void' ? '<button class="btn small" id="gen-all"' + (E.isNew ? ' disabled title="บันทึกก่อน"' : '') + '>📚 รวมเล่มทั้งชุด</button>' : '') +
+      '<p class="muted small" style="margin:8px 0 0">ได้ไฟล์ Word (.docx) → เปิดใน Word แล้ว "บันทึกเป็น PDF"</p></div>';
+    $('ed-side').innerHTML = html;
+    $('ed-side').onclick = function (e) {
+      var a = e.target.closest('[data-goto]');
+      if (a) { var st = Number(a.getAttribute('data-step')); if (st !== E.step) gotoStep(st); setTimeout(function () { focusField(a.getAttribute('data-goto')); }, 60); }
+      if (e.target.id === 'gen-all') generate('all');
+    };
+  }
+  function focusField(key) {
+    var map = { '@tor3': 'sec-tor3', '@ic3': 'sec-ic3', '@items': 'sec-items-wrap', '@vendor': 'sec-vendor', '@bg': 'sec-bg', '@obj': 'sec-obj', '@spec': 'sec-spec' };
+    var el = map[key] ? $(map[key]) : ($('f-' + key) || (key === 'requester_id' ? $('f-requester') : null));
+    if (!el) { if (key === '@proc_no' || key === '@inspect_no') toast('เลขที่จะออกให้เมื่อกดยืนยันในขั้นที่เกี่ยวข้อง'); return; }
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    var inp = el.matches('input,textarea,select') ? el : el.querySelector('input,textarea,select');
+    if (inp) { inp.classList.add('miss'); inp.focus({ preventScroll: true }); setTimeout(function () { inp.classList.remove('miss'); }, 2500); }
+  }
+
+  // ---------- แถบปุ่มด้านล่าง ----------
+  var CONFIRM_LABEL = { 2: 'ยืนยันขอซื้อ (ออกเลขที่)', 3: 'ยืนยันสั่งซื้อ (ออกเลขคำสั่งตรวจรับ)', 4: 'ยืนยันตรวจรับแล้ว', 5: 'ยืนยันเบิกแล้ว' };
+  function renderAct() {
+    var s = stepDef(E.step), P = E.data.proc;
+    var stIdx = META.statusOrder.indexOf(P.status);
+    var confirmed = s.confirmTo && META.statusOrder.indexOf(s.confirmTo) <= stIdx;
+    var prevOk = !s.confirmTo || META.statusOrder.indexOf(s.confirmTo) - stIdx <= 1;
+    var wait = E.stale ? ' disabled title="กำลังตรวจข้อมูลล่าสุด…"' : '';
+    var html = '<div class="state" id="act-state"></div>';
+    if (E.canEdit) html += '<button class="btn" id="act-save"' + wait + '>💾 บันทึกร่าง</button>';
+    if (canWrite() && P.status !== 'void') html += '<button class="btn" id="act-gen"' + (E.isNew ? ' disabled title="บันทึกก่อน"' : wait) + '>📄 ออกเอกสารขั้นนี้</button>';
+    if (E.canEdit && s.confirmTo && P.status !== 'void') {
+      html += confirmed ? '<button class="btn" disabled>✓ ยืนยันแล้ว</button>'
+        : '<button class="btn primary" id="act-confirm"' + (prevOk ? wait : ' disabled title="ยืนยันขั้นก่อนหน้าก่อน"') + '>' + CONFIRM_LABEL[s.step] + '</button>';
+    }
+    if (E.step < 5) html += '<button class="btn ' + (!s.confirmTo || confirmed ? 'primary' : '') + '" id="act-next">ถัดไป: ' + esc(stepDef(E.step + 1).name) + ' →</button>';
+    $('ed-act').innerHTML = html;
+    renderActState();
+    if ($('act-save')) $('act-save').onclick = function () { save(); };
+    if ($('act-gen')) $('act-gen').onclick = function () { generate(E.step); };
+    if ($('act-confirm')) $('act-confirm').onclick = confirmStep;
+    if ($('act-next')) $('act-next').onclick = function () { gotoStep(E.step + 1); };
+  }
+  function renderActState() {
+    var el = $('act-state'); if (!el) return;
+    if (E.stale) { el.className = 'state'; el.textContent = '⟳ กำลังตรวจข้อมูลล่าสุด…'; }
+    else if (E.saving) { el.className = 'state'; el.textContent = '⟳ กำลังบันทึก… (กรอกต่อได้)'; }
+    else if (E.saveErr) { el.className = 'state dirty'; el.textContent = '⚠ บันทึกไม่สำเร็จ — กดบันทึกอีกครั้ง'; }
+    else if (E.dirty) { el.className = 'state dirty'; el.textContent = '● มีการแก้ไขที่ยังไม่บันทึก'; }
+    else { el.className = 'state'; el.textContent = E.isNew ? 'งานใหม่ — ยังไม่ได้บันทึก' : (E.savedAt ? '✓ บันทึกแล้ว ' + E.savedAt : 'ข้อมูลล่าสุด'); }
+    var b = $('act-save'); if (b && !E.stale) b.disabled = false;
+  }
+
+  // ================================================================ บันทึก / ยืนยัน / ออกเอกสาร
+  // ช่องที่ระบบกำหนด (ไม่ใช่ช่องที่ผู้ใช้กรอก) — รับค่าจากเซิร์ฟเวอร์เสมอหลังบันทึก
+  var SYS_FIELDS = ['proc_id', 'rev', 'status', 'proc_no', 'fiscal_year', 'total_amount', 'due_date', 'updated_at', 'updated_by', 'created_at', 'created_by', 'inspect_order_no', 'folder_id', 'void_reason'];
+  /**
+   * รับผลการบันทึก: ถ้าระหว่างบันทึกผู้ใช้ไม่ได้แก้อะไรเพิ่ม (ver ไม่เปลี่ยน) รับค่าทั้งหมด
+   * ถ้าแก้เพิ่มแล้ว รับเฉพาะช่องที่ระบบกำหนด และยังถือว่า "มีการแก้ไขที่ยังไม่บันทึก"
+   */
+  function applySaved(J, proc, ver0) {
+    var clean = ver0 === undefined || (J.ver || 0) === ver0;
+    Object.keys(proc).forEach(function (k) {
+      if (!clean && SYS_FIELDS.indexOf(k) < 0) return;
+      var v = proc[k] === null || proc[k] === undefined ? '' : String(proc[k]);
+      J.data.proc[k] = /_date$/.test(k) && /^\d{4}-\d{2}-\d{2}/.test(v) ? v.substring(0, 10) : v;
+    });
+    J.base = String(proc.rev || '0'); J.isNew = false; J.saveErr = false;
+    if (clean) { J.dirty = false; J.changed = {}; }
+    J.savedAt = new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+    patchList(J); patchHist(J);
+    if (clean) cacheJob(J); else idb.del('proc:job:' + J.data.proc.proc_id);
+  }
+  /**
+   * บันทึกเบื้องหลัง: กรอกต่อได้ระหว่างบันทึก (ไม่วาดหน้าใหม่ ช่องที่กำลังพิมพ์ไม่หลุด)
+   * กดซ้ำระหว่างบันทึก → บันทึกต่ออีกรอบเมื่อรอบแรกเสร็จ
+   */
+  function save(silent) {
+    if (!nz(E.data.proc.subject)) { toast('กรุณากรอกชื่อพัสดุ/งานที่จะซื้อก่อนบันทึก', true); gotoStep(1); setTimeout(function () { focusField('subject'); }, 80); return Promise.resolve(false); }
+    var J = E;
+    if (J.saving) { J.saveAgain = true; return J.saving; }
+    var ver0 = J.ver || 0;
+    J.saving = run('apiProcSave', toPayload()).then(function (proc) {
+      J.saving = null;
+      applySaved(J, proc, ver0);
+      if (E === J) {
+        if (!silent) toast('บันทึกแล้ว');
+        renderTop(); renderAct(); renderSide(); // ไม่วาดช่องกรอกใหม่ → ช่องที่กำลังพิมพ์ไม่หลุดโฟกัส
+      }
+      if (J.saveAgain) { J.saveAgain = false; if (J.dirty && E === J) return save(true); }
+      return true;
+    }).catch(function (e) {
+      J.saving = null; J.saveErr = true; J.saveAgain = false;
+      toast(e.message, true);
+      if (E === J) {
+        renderActState();
+        if (/ถูกแก้โดย/.test(e.message)) modal({ title: 'มีคนแก้งานนี้ก่อนคุณ', html: '<p>' + esc(e.message) + '</p><p class="muted small">กด "โหลดใหม่" เพื่อดูข้อมูลล่าสุด (การแก้ไขของคุณที่ยังไม่บันทึกจะหายไป)</p>',
+          buttons: [{ label: 'ปิด', value: false }, { label: 'โหลดใหม่', value: true, cls: 'primary' }] }).then(function (v) { if (v) { J.dirty = false; idb.del('proc:job:' + J.data.proc.proc_id); openJob(J.data.proc.proc_id, J.step); } });
+      }
+      return false;
+    });
+    renderActState();
+    var b = $('act-save'); if (b) b.disabled = true;
+    return J.saving;
+  }
+  /** ราคาล่าสุด: ใส่รายการของงานที่เพิ่งบันทึก (ไม่ต้องโหลดใหม่จากเซิร์ฟเวอร์) */
+  function patchHist(J) {
+    if (!HIST) return;
+    var P = J.data.proc;
+    if (P.status === 'void') return;
+    var date = String(P.request_date || P.tor_memo_date || P.updated_at || '').substring(0, 10);
+    var job = P.proc_no ? P.proc_no + '/' + P.fiscal_year : P.proc_id;
+    J.data.items.forEach(function (i) {
+      if (!nz(i.description) || !(num(i.unit_price) > 0)) return;
+      var rec = { price: num(i.unit_price), unit: i.unit || '', brand: i.brand || '', model: i.model || '', date: date, job: job, proc_id: P.proc_id };
+      ['N:' + itemKey(i.description)].concat(nz(i.item_code) ? ['C:' + i.item_code] : []).forEach(function (k) {
+        var old = HIST[k], brands = old && old.brands ? old.brands.slice() : [];
+        if (rec.brand && brands.indexOf(rec.brand) < 0) brands.push(rec.brand);
+        if (!old || old.proc_id === P.proc_id || !old.date || date >= old.date) { rec.brands = brands; HIST[k] = JSON.parse(JSON.stringify(rec)); }
+        else old.brands = brands;
+      });
+    });
+  }
+  var CONFIRM_TEXT = {
+    2: 'ระบบจะ<b>ออกเลขที่ขอซื้อ</b> (เลขถัดไปของปีงบประมาณ) ใช้กับบันทึกรายงานขอซื้อ ใบสั่งซื้อ และหนังสือ ศธ. — เลขที่ออกแล้วจะไม่ถูกนำกลับมาใช้ซ้ำ',
+    3: 'ระบบจะ<b>ออกเลขคำสั่งแต่งตั้งผู้ตรวจรับ</b> (พ …) และเปลี่ยนสถานะเป็น "สั่งซื้อแล้ว"',
+    4: 'เปลี่ยนสถานะเป็น "ตรวจรับแล้ว" — หลังจากนี้<b>แก้ไขได้เฉพาะหัวหน้าเจ้าหน้าที่และผู้ดูแลระบบ</b>',
+    5: 'เปลี่ยนสถานะเป็น "เบิกแล้ว" (ปิดงาน)'
+  };
+  function confirmStep() {
+    var s = stepDef(E.step);
+    var skip = E.step === 2 ? '@proc_no' : (E.step === 3 ? '@inspect_no' : '');
+    var m = missing(s.forms).filter(function (x) { return x.key !== skip; });
+    if (m.length) {
+      modal({ title: 'ยังยืนยันไม่ได้ — ข้อมูลยังไม่ครบ', html: '<p>กรอกให้ครบก่อน:</p><ul>' + m.map(function (x) { return '<li>' + esc(x.label) + (x.step !== E.step ? ' <span class="muted">(ขั้นที่ ' + x.step + ')</span>' : '') + '</li>'; }).join('') + '</ul>' });
+      return;
+    }
+    modal({ title: CONFIRM_LABEL[E.step] + '?', html: '<p>' + CONFIRM_TEXT[E.step] + '</p><p class="muted small">ระบบจะบันทึกข้อมูลก่อน แล้วจึงยืนยัน</p>',
+      buttons: [{ label: 'ยกเลิก', value: false }, { label: 'ยืนยัน', value: true, cls: 'primary' }] }).then(function (ok) {
+      if (!ok) return;
+      var J = E;
+      var doConfirm = function () {
+        busyOn('กำลังบันทึกและยืนยัน…');
+        return run('apiProcConfirm', toPayload(), J.step);
+      };
+      (J.saving ? J.saving.then(doConfirm) : doConfirm()).then(function (res) {
+        busyOff(); applySaved(J, res.proc);
+        var proc = res.proc;
+        if (!res.confirmed) {
+          renderEditor();
+          return modal({ title: 'บันทึกแล้ว แต่ยังยืนยันไม่ได้', html: '<p>ยังขาด:</p><ul>' + res.missing.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>' }).then(function () { return false; });
+        }
+        var msg = E.step === 2 ? 'ได้เลขที่ขอซื้อ ' + docNo(proc) : (E.step === 3 ? 'ได้เลขคำสั่งผู้ตรวจรับ พ ' + proc.inspect_order_no : 'ยืนยันแล้ว');
+        renderEditor();
+        return modal({ title: '✓ ' + msg, html: '<p>ต้องการออกเอกสารของขั้นนี้เลยไหม?</p>', buttons: [{ label: 'ภายหลัง', value: false }, { label: '📄 ออกเอกสารเลย', value: true, cls: 'primary' }] });
+      }).then(function (go) { if (go) generate(E.step); }).catch(function (e) { busyOff(); toast(e.message, true); });
+    });
+  }
+  var genBusy = false;
+  function generate(which) {
+    if (genBusy) { toast('กำลังสร้างเอกสารอยู่ — รอให้เสร็จก่อน'); return; } // กันกดซ้ำ (สร้างซ้อนกันจะช้าลงทั้งคู่)
+    var doIt = function () {
+      var forms = which === 'all' ? 'ทุกแบบที่ข้อมูลครบ + ชุดรวม' : stepDef(which).forms.join(', ');
+      if (which !== 'all') {
+        var m = missing(stepDef(which).forms);
+        if (m.length) { genBusy = false; modal({ title: 'ยังออกเอกสารไม่ได้', html: '<p>ข้อมูลที่ยังขาด:</p><ul>' + m.map(function (x) { return '<li>' + esc(x.label) + '</li>'; }).join('') + '</ul>' }); return; }
+      }
+      busyOn('กำลังสร้างเอกสาร ' + forms, 'ใช้เวลาประมาณ 10–60 วินาที กรุณาอย่าปิดหน้านี้');
+      var J = E;
+      run('apiProcGenerate', J.data.proc.proc_id, which).then(function (r) {
+        busyOff(); genBusy = false;
+        var list = r.files.map(function (f) { return '<li><a target="_blank" href="' + esc(f.url) + '">' + esc(f.name) + '</a>' + (f.missing.length ? ' <span class="muted">(ไม่มีค่า: ' + esc(f.missing.join(', ')) + ')</span>' : '') + '</li>'; }).join('') +
+          (r.combined ? '<li><a target="_blank" href="' + esc(r.combined.url) + '"><b>' + esc(r.combined.name) + '</b></a></li>' : '');
+        modal({ title: '✓ สร้างเอกสารแล้ว', wide: true, html: '<ul>' + list + '</ul><p><a class="btn small" target="_blank" href="' + esc(r.folderUrl) + '">📁 เปิดโฟลเดอร์เอกสารของงานนี้</a></p>' +
+          '<p class="muted small">ไฟล์เป็น Word (.docx) — เปิดด้วย Microsoft Word ตรวจทาน แล้วเลือก "บันทึกเป็น PDF" เพื่อพิมพ์/ส่งต่อ · ถ้าออกซ้ำ ฉบับเดิมจะอยู่ในโฟลเดอร์ "ฉบับก่อนหน้า"</p>' });
+        // ใช้ผลที่ได้กลับมาเลย ไม่ต้องเปิดงานใหม่ทั้งงาน
+        if (J === E) {
+          Object.keys(r.docs || {}).forEach(function (k) { J.docs[k] = r.docs[k]; });
+          J.folderUrl = r.folderUrl || J.folderUrl; if (r.folderId) J.data.proc.folder_id = r.folderId;
+          renderTop(); renderSide(); cacheJob(J);
+        }
+      }).catch(function (e) { busyOff(); genBusy = false; toast(e.message, true); });
+    };
+    genBusy = true;
+    if (E.dirty || E.saving) save(true).then(function (ok) { if (ok) doIt(); else genBusy = false; }); else doIt();
+  }
+
+  // ================================================================ ผู้ขาย / คัดลอก / ประวัติ / ยกเลิก
+  var VF = [['vendor_name', 'ชื่อผู้ขาย (ร้าน/บริษัท/ชื่อบุคคล)', 'เช่น บริษัท สกาย อินโน เวชั่น เทคโนโลยี จำกัด', true], ['branch', 'สาขา', 'เช่น 00000 (สำนักงานใหญ่) — เว้นว่างได้'],
+    ['tax_id', 'เลขประจำตัวผู้เสียภาษี 13 หลัก', ''], ['phone', 'โทรศัพท์', ''], ['address', 'ที่อยู่ (เลขที่ หมู่ ถนน)', ''], ['subdistrict', 'ตำบล/แขวง', ''],
+    ['district', 'อำเภอ/เขต', ''], ['province', 'จังหวัด', ''], ['postcode', 'รหัสไปรษณีย์', '']];
+  function vendorForm(v) {
+    v = v || {};
+    modal({ title: v.vendor_id ? 'แก้ไขข้อมูลผู้ขาย ' + v.vendor_id : 'เพิ่มผู้ขายรายใหม่', wide: true,
+      html: '<div class="fg">' + VF.map(function (f) {
+        return '<div class="fld' + (f[0] === 'vendor_name' || f[0] === 'address' ? ' wide' : '') + '"><label>' + esc(f[1]) + (f[3] ? '<span class="req">*</span>' : '') + '</label><input class="p-in" data-vf="' + f[0] + '" placeholder="' + esc(f[2]) + '" value="' + esc(v[f[0]] || '') + '"></div>';
+      }).join('') + '</div><p class="muted small">ข้อมูลนี้ใช้ในใบสั่งซื้อ หนังสือแจ้ง และประกาศผู้ชนะ</p>',
+      buttons: [{ label: 'ยกเลิก', value: false }, { label: 'บันทึกผู้ขาย', value: true, cls: 'primary' }],
+      collect: function (bg) {
+        var o = { vendor_id: v.vendor_id || '' };
+        Array.prototype.forEach.call(bg.querySelectorAll('[data-vf]'), function (i) { o[i.getAttribute('data-vf')] = i.value.trim(); });
+        if (!o.vendor_name) { modalErr(bg, 'กรุณากรอกชื่อผู้ขาย'); return false; }
+        var tax = o.tax_id.replace(/\D/g, '');
+        if (o.tax_id && tax.length !== 13) { modalErr(bg, 'เลขประจำตัวผู้เสียภาษีต้องมี 13 หลัก (ตอนนี้มี ' + tax.length + ' หลัก) — หรือเว้นว่างไว้ก่อน'); return false; }
+        if (o.postcode && !/^\d{5}$/.test(o.postcode.replace(/\D/g, ''))) { modalErr(bg, 'รหัสไปรษณีย์ต้องเป็นตัวเลข 5 หลัก'); return false; }
+        return run('apiProcSaveVendor', o);
+      }
+    }).then(function (row) {
+      if (!row || row === true) return;
+      var t = A.S.ref.vendors, idx = t.cols.indexOf('vendor_id');
+      var arr = t.cols.map(function (c) { return row[c] === undefined ? '' : row[c]; });
+      var at = -1; t.rows.forEach(function (r, i) { if (r[idx] === row.vendor_id) at = i; });
+      if (at >= 0) t.rows[at] = arr; else t.rows.push(arr);
+      E.data.vendor = row; setP('vendor_id', row.vendor_id); renderStep(); toast('บันทึกผู้ขาย ' + row.vendor_id + ' แล้ว');
+    });
+  }
+  function copyFromJob() {
+    var go = function () {
+      var rows = LIST.rows.filter(function (r) { return r.proc_id !== E.data.proc.proc_id; });
+      modal({ title: 'คัดลอกจากงานเดิม', wide: true,
+        html: '<input class="p-in" id="cp-q" placeholder="ค้นหาชื่องาน ผู้ขาย หรือเลขที่"><div id="cp-list" style="max-height:260px;overflow:auto;margin:8px 0"></div>' +
+          '<div class="lb" style="font-weight:600">คัดลอกส่วนใด</div><div class="radio-row" id="cp-what">' +
+          [['tor', 'ข้อความ TOR', 1], ['items', 'รายการพัสดุ', 1], ['cmte', 'กรรมการทั้ง 2 ชุด', 0], ['proj', 'โครงการ งบ หน่วยงาน', 1], ['cond', 'เงื่อนไข (ส่งมอบ ประกัน)', 1], ['vendor', 'ผู้ขาย', 0]]
+            .map(function (o) { return '<label><input type="checkbox" value="' + o[0] + '"' + (o[2] ? ' checked' : '') + '> ' + o[1] + '</label>'; }).join('') + '</div>' +
+          '<p class="muted small">ข้อมูลที่คัดลอกจะทับช่องเดิมในงานนี้ ยังไม่บันทึกจนกว่าจะกด "บันทึกร่าง"</p>',
+        buttons: [{ label: 'ยกเลิก', value: false }, { label: 'คัดลอก', value: true, cls: 'primary' }],
+        onOpen: function (bg) {
+          var sel = '';
+          var draw = function () {
+            var q = bg.querySelector('#cp-q').value.trim().toLowerCase();
+            var hit = rows.filter(function (r) { return !q || [r.subject, r.vendor, docNo(r)].join(' ').toLowerCase().indexOf(q) >= 0; }).slice(0, 40);
+            bg.querySelector('#cp-list').innerHTML = hit.length ? hit.map(function (r) {
+              return '<div class="p-card" style="padding:8px 12px;margin-bottom:6px' + (sel === r.proc_id ? ';border-color:var(--brand);background:#eef3fa' : '') + '" data-id="' + esc(r.proc_id) + '"><div><div class="t" style="font-size:15px">' + esc(r.subject || '-') +
+                '</div><div class="m">' + esc(docNo(r) || r.proc_id) + ' · ' + esc(r.vendor || '') + '</div></div><div class="r">' + stChip(r.status) + '</div></div>';
+            }).join('') : '<p class="muted">ไม่พบงาน</p>';
+          };
+          bg.querySelector('#cp-q').oninput = draw;
+          bg.querySelector('#cp-list').onclick = function (e) { var c = e.target.closest('[data-id]'); if (c) { sel = c.getAttribute('data-id'); bg.setAttribute('data-sel', sel); draw(); } };
+          draw();
+        },
+        collect: function (bg) {
+          var id = bg.getAttribute('data-sel'); if (!id) { toast('เลือกงานต้นแบบก่อน', true); return false; }
+          return { id: id, what: Array.prototype.filter.call(bg.querySelectorAll('#cp-what input'), function (i) { return i.checked; }).map(function (i) { return i.value; }) };
+        }
+      }).then(function (c) {
+        if (!c) return;
+        busyOn('กำลังคัดลอก…');
+        run('apiProcGet', c.id, { log: false }).then(function (d) {
+          busyOff();
+          var src = fromServer(d), w = function (k) { return c.what.indexOf(k) >= 0; };
+          if (w('tor')) E.data.specs = src.specs;
+          if (w('items')) E.data.items = src.items.length ? src.items : [blankItem()];
+          if (w('cmte')) E.data.committees = src.committees;
+          if (w('proj')) ['project_name', 'admin_group', 'responsible_unit', 'budget_type', 'budget_source', 'reason', 'dept'].forEach(function (k) { E.data.proc[k] = src.proc[k] || ''; });
+          if (w('cond')) ['delivery_days', 'price_validity_days', 'warranty_years', 'repair_days', 'contract_sign_days', 'price_source', 'item_mode', 'po_line_unit'].forEach(function (k) { E.data.proc[k] = src.proc[k] || E.data.proc[k]; });
+          if (w('vendor') && src.vendor) { E.data.vendor = src.vendor; E.data.proc.vendor_id = src.vendor.vendor_id; }
+          markDirty('คัดลอกจาก ' + (docNo(d.proc) || d.proc.proc_id));
+          renderStep(); toast('คัดลอกแล้ว — ตรวจทานแล้วกด "บันทึกร่าง"');
+        }).catch(function (e) { busyOff(); toast(e.message, true); });
+      });
+    };
+    if (LIST) go(); else { busyOn('กำลังโหลดรายการงาน…'); refreshList().then(function () { busyOff(); if (LIST) go(); }); }
+  }
+  function showLog() {
+    var draw = function (log) {
+      return '<div class="loglist">' + (log.length ? log.map(function (l) {
+        return '<div><b>' + esc(l.action) + '</b> <span class="muted">' + esc(String(l.at).slice(0, 16)) + ' · ' + esc(l.by_email) + '</span>' +
+          (l.from_status !== l.to_status && l.to_status ? ' · ' + stChip(l.to_status) : '') + (l.note ? '<div class="muted small">' + esc(l.note) + '</div>' : '') + '</div>';
+      }).join('') : '<p class="muted">ยังไม่มีประวัติ</p>') + '</div>';
+    };
+    var J = E;
+    modal({ title: 'ประวัติของงานนี้', wide: true, html: '<div id="log-box"><div class="loading"><div class="spinner"></div><div>กำลังโหลดประวัติ…</div></div></div>' });
+    run('apiProcLog', J.data.proc.proc_id).then(function (log) {
+      J.log = log; var b = $('log-box'); if (b) b.innerHTML = draw(log);
+    }).catch(function (e) { var b = $('log-box'); if (b) b.innerHTML = '<div class="banner bad">' + esc(e.message) + '</div>'; });
+  }
+  function voidJob() {
+    modal({ title: 'ยกเลิกงานนี้?', html: '<p>ข้อมูลและเอกสารจะยังอยู่ แต่สถานะเป็น "ยกเลิก" และเลขที่ที่ออกไปแล้วจะไม่ถูกนำกลับมาใช้</p>' +
+      '<label class="lb">เหตุผลที่ยกเลิก<span class="req">*</span></label><textarea class="p-in" id="void-r" placeholder="เช่น ผู้ขายไม่สามารถส่งของได้"></textarea>',
+      buttons: [{ label: 'ไม่ยกเลิก', value: false }, { label: 'ยืนยันยกเลิกงาน', value: true, cls: 'danger' }],
+      collect: function (bg) { var r = bg.querySelector('#void-r').value.trim(); if (!r) { toast('กรอกเหตุผลก่อน', true); return false; } return r; }
+    }).then(function (reason) {
+      if (!reason) return;
+      var id = E.data.proc.proc_id;
+      run('apiProcVoid', id, reason).then(function () { toast('ยกเลิกงานแล้ว'); E.dirty = false; idb.del('proc:job:' + id); LIST && (LIST.rows.forEach(function (r) { if (r.proc_id === id) r.status = 'void'; }), cacheList()); openJob(id, 1); })
+        .catch(function (e) { toast(e.message, true); });
+    });
+  }
+
+  window.ProcUI = { show: show, isDirty: function () { return !!(E && (E.dirty || E.saving)); } };
+})();
+</script>

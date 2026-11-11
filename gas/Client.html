@@ -1,0 +1,439 @@
+<script>
+(function () {
+  'use strict';
+
+  // ---------- เครื่องมือพื้นฐาน ----------
+  var $ = function (id) { return document.getElementById(id); };
+  var esc = function (s) {
+    return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  };
+  function run(fn) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    var t0 = performance.now();
+    return new Promise(function (resolve, reject) {
+      var r = google.script.run.withSuccessHandler(function (res) {
+        perfRec(fn, performance.now() - t0, res);
+        if (res && res.ok) resolve(res.data); else reject(new Error(res ? res.error : 'ไม่มีผลลัพธ์จากเซิร์ฟเวอร์'));
+      }).withFailureHandler(function (e) { perfRec(fn, performance.now() - t0, null); reject(e); });
+      r[fn].apply(r, args);
+    });
+  }
+
+  // ---------- จับเวลาทุกคำสั่ง (ดูได้ที่ ตั้งค่า → เครื่องมือ → ความเร็วของระบบ) ----------
+  var PERF = [], perfT;
+  function perfRec(fn, ms, res) {
+    var p = res && res.perf || {};
+    PERF.push({ fn: fn, at: Date.now(), ms: Math.round(ms), srv: res && res.ms !== undefined ? res.ms : null,
+      rd: p.reads !== undefined ? p.reads : null, rdMs: p.readMs !== undefined ? p.readMs : null, wr: p.writes !== undefined ? p.writes : null,
+      fl: p.flushMs || 0, op: p.openMs || 0, api: p.api || 0, apiErr: p.apiErr || '', ok: !!(res && res.ok) });
+    if (PERF.length > 300) PERF.splice(0, PERF.length - 300);
+    clearTimeout(perfT); perfT = setTimeout(function () { idb.set('perf', PERF); }, 1500);
+  }
+  var toastTimer;
+  function toast(msg, bad) {
+    var t = $('toast');
+    t.textContent = msg; t.className = 'toast' + (bad ? ' bad' : ''); t.hidden = false;
+    clearTimeout(toastTimer); toastTimer = setTimeout(function () { t.hidden = true; }, bad ? 6000 : 3000);
+  }
+  function busy(btn, on) { if (btn) btn.disabled = !!on; }
+  function rowsOf(t) { // {cols, rows} → [{...}]
+    if (!t) return [];
+    return t.rows.map(function (r) { var o = {}; t.cols.forEach(function (c, i) { o[c] = r[i]; }); return o; });
+  }
+
+  // ---------- แคชในเบราว์เซอร์ (IndexedDB) — ถ้าใช้ไม่ได้ จะใช้หน่วยความจำแทน ----------
+  var mem = {};
+  var idb = (function () {
+    var p = null;
+    function open() {
+      if (p) return p;
+      p = new Promise(function (resolve) {
+        try {
+          var req = indexedDB.open('procure-cache', 1);
+          req.onupgradeneeded = function () { req.result.createObjectStore('kv'); };
+          req.onsuccess = function () { resolve(req.result); };
+          req.onerror = function () { resolve(null); };
+        } catch (e) { resolve(null); }
+      });
+      return p;
+    }
+    return {
+      get: function (k) {
+        return open().then(function (db) {
+          if (!db) return mem[k];
+          return new Promise(function (resolve) {
+            try {
+              var r = db.transaction('kv').objectStore('kv').get(k);
+              r.onsuccess = function () { resolve(r.result); };
+              r.onerror = function () { resolve(mem[k]); };
+            } catch (e) { resolve(mem[k]); }
+          });
+        });
+      },
+      set: function (k, v) {
+        mem[k] = v;
+        return open().then(function (db) {
+          if (!db) return;
+          try { db.transaction('kv', 'readwrite').objectStore('kv').put(v, k); } catch (e) { /* ไม่เป็นไร */ }
+        });
+      },
+      del: function (k) {
+        delete mem[k];
+        return open().then(function (db) {
+          if (!db) return;
+          try { db.transaction('kv', 'readwrite').objectStore('kv').delete(k); } catch (e) { /* ไม่เป็นไร */ }
+        });
+      },
+      clear: function () {
+        mem = {};
+        return open().then(function (db) {
+          if (!db) return;
+          try { db.transaction('kv', 'readwrite').objectStore('kv').clear(); } catch (e) { /* ไม่เป็นไร */ }
+        });
+      }
+    };
+  })();
+
+  // ---------- สถานะ ----------
+  var S = { user: null, ref: null, key: '', perf: {} };
+  var ROLE_TH = { admin: 'ผู้ดูแลระบบ', officer: 'เจ้าหน้าที่พัสดุ', head: 'หัวหน้าเจ้าหน้าที่', finance: 'การเงิน', viewer: 'ครูทั่วไป' };
+  function has(role) { return !!(S.user && S.user.roles.indexOf(role) >= 0); }
+
+  // ---------- เริ่มต้น ----------
+  function boot() {
+    var t0 = performance.now();
+    idb.get('perf').then(function (p) { if (Array.isArray(p) && p.length && PERF.every(function (x) { return x.at > p[p.length - 1].at; })) PERF = p.concat(PERF).slice(-300); });
+    idb.get('boot').then(function (cached) {
+      if (cached && cached.ref && cached.user) {
+        S.user = cached.user; S.ref = cached.ref; S.key = cached.key;
+        S.perf.local = Math.round(performance.now() - t0);
+        S.perf.source = 'สำเนาในเครื่อง (กำลังตรวจกับเซิร์ฟเวอร์…)';
+        showApp();
+      }
+      var t1 = performance.now();
+      return run('apiBootstrap', cached ? cached.key : '').then(function (d) {
+        S.perf.server = Math.round(performance.now() - t1);
+        S.perf.serverInside = d.serverMs;
+        S.appVersion = d.appVersion;
+        if (d.denied) { showDenied(d.email); return; }
+        S.user = d.user;
+        if (d.notModified) {
+          S.perf.source = 'สำเนาในเครื่อง (ล่าสุดแล้ว)';
+        } else {
+          S.ref = d.ref; S.key = d.key;
+          S.perf.source = d.ref.fromCache ? 'เซิร์ฟเวอร์ (แคช)' : 'เซิร์ฟเวอร์ (อ่านจากชีต)';
+          idb.set('boot', { key: d.key, ref: d.ref, user: d.user });
+        }
+        S.perf.total = Math.round(performance.now() - t0);
+        showApp();
+      });
+    }).catch(function (e) {
+      if (!S.ref) { $('page-loading').innerHTML = '<div class="card warn"><h3>โหลดไม่สำเร็จ</h3><p>' + esc(e.message) + '</p></div>'; }
+      else toast('ตรวจข้อมูลกับเซิร์ฟเวอร์ไม่สำเร็จ: ' + e.message, true);
+    });
+  }
+
+  function showDenied(email) {
+    hideAll(); $('page-denied').hidden = false; $('nav').hidden = true;
+    $('denied-email').textContent = email ? 'บัญชีที่ใช้อยู่: ' + email : 'ไม่พบอีเมลของบัญชีที่ใช้อยู่';
+    $('who').textContent = '';
+  }
+
+  function hideAll() { Array.prototype.forEach.call(document.querySelectorAll('.page'), function (p) { p.hidden = true; }); }
+
+  function showApp() {
+    $('who').innerHTML = esc(S.user.name) + '<br>' + S.user.roles.map(function (r) { return '<span class="chip">' + esc(ROLE_TH[r] || r) + '</span>'; }).join('') +
+      (S.user.isDev ? '<span class="chip dev">โหมดพัฒนา</span>' : '');
+    Array.prototype.forEach.call(document.querySelectorAll('[data-role]'), function (el) { el.hidden = !has(el.getAttribute('data-role')); });
+    $('nav').hidden = false;
+    fillPersonList();
+    go(currentPage);
+  }
+
+  // ---------- เมนู ----------
+  var currentPage = 'home';
+  function go(page) {
+    if (currentPage === 'proc' && page !== 'proc' && window.ProcUI && window.ProcUI.isDirty()) {
+      toast('มีการแก้ไขงานจัดซื้อที่ยังไม่บันทึก — กด "บันทึกร่าง" หรือ "← รายการงาน" ก่อน', true);
+      return;
+    }
+    currentPage = page;
+    hideAll(); $('page-' + page).hidden = false;
+    Array.prototype.forEach.call(document.querySelectorAll('#nav button'), function (b) { b.classList.toggle('on', b.getAttribute('data-page') === page); });
+    if (page === 'home') renderHome();
+    if (page === 'ref') renderRef();
+    if (page === 'settings') openSettings(currentSetTab);
+    if (page === 'proc' && window.ProcUI) window.ProcUI.show();
+  }
+  $('nav').addEventListener('click', function (e) { var p = e.target.getAttribute('data-page'); if (p) go(p); });
+
+  // ---------- หน้าแรก ----------
+  function personName(id) {
+    var p = rowsOf(S.ref.personnel).filter(function (x) { return x.person_id === id; })[0];
+    return p ? p.full_name : id;
+  }
+  function renderHome() {
+    var r = S.ref;
+    var stats = [
+      ['บุคลากร', r.personnel.rows.length], ['รายการพัสดุ', r.items.rows.length], ['ผู้ขาย', r.vendors.rows.length],
+      ['หมวดพัสดุ', r.categories.rows.length], ['โครงการ', r.projects.rows.length], ['ปีงบประมาณ', r.config.fiscal_year_current]
+    ];
+    $('stats').innerHTML = stats.map(function (s) { return '<div class="stat"><div class="n">' + esc(s[1]) + '</div><div class="l">' + esc(s[0]) + '</div></div>'; }).join('');
+    $('me').innerHTML = '<div><b>' + esc(S.user.name) + '</b> ' + (S.user.positionTitle ? '<span class="muted">' + esc(S.user.positionTitle) + '</span>' : '') + '</div>' +
+      '<div class="muted small">' + esc(S.user.email) + (S.user.personId ? ' · ' + esc(S.user.personId) : '') + '</div>' +
+      '<div>' + S.user.roles.map(function (x) { return '<span class="chip">' + esc(ROLE_TH[x] || x) + '</span>'; }).join('') + '</div>';
+    var p = S.perf;
+    var line = function (a, b) { return '<div><span>' + esc(a) + '</span><b>' + esc(b) + '</b></div>'; };
+    $('perf').innerHTML =
+      (p.local !== undefined ? line('แสดงผลจากสำเนาในเครื่อง', p.local + ' ms') : '') +
+      (p.server !== undefined ? line('ตรวจกับเซิร์ฟเวอร์ (ไป-กลับ)', p.server + ' ms') : '') +
+      (p.serverInside !== undefined ? line('เวลาประมวลผลบนเซิร์ฟเวอร์', p.serverInside + ' ms') : '') +
+      (p.total !== undefined ? line('รวมทั้งหมด', p.total + ' ms') : '') +
+      line('แหล่งข้อมูล', p.source || '-') + line('สร้างสำเนาเมื่อ', r.builtAt || '-');
+    var signers = rowsOf(r.signers);
+    $('signers-view').innerHTML = '<table><tr><th>บทบาท</th><th>ผู้ลงนาม</th></tr>' + signers.map(function (s) {
+      return '<tr><td>' + esc(s.sign_label) + '</td><td>' + esc(personName(s.person_id)) + (s.title_override ? ' <span class="muted">(' + esc(s.title_override) + ')</span>' : '') + '</td></tr>';
+    }).join('') + '</table>';
+  }
+
+  // ---------- ข้อมูลอ้างอิง ----------
+  var refTab = 'personnel';
+  var REF_VIEW = {
+    personnel: { cols: ['person_id', 'full_name', 'staff_type', 'position_title', 'dept'], head: ['รหัส', 'ชื่อ-สกุล', 'ประเภท', 'ตำแหน่ง', 'กลุ่มสาระ/งาน'] },
+    items: { cols: ['item_code', 'item_name', 'unit', 'cat_code'], head: ['รหัส', 'ชื่อพัสดุ', 'หน่วย', 'หมวด'] },
+    vendors: { cols: ['vendor_id', 'vendor_name', 'branch', 'province'], head: ['รหัส', 'ชื่อผู้ขาย', 'สาขา', 'จังหวัด'] },
+    departments: { cols: ['dept_id', 'dept_name', 'dept_type'], head: ['รหัส', 'ชื่อ', 'ประเภท'] }
+  };
+  function renderRef() {
+    var v = REF_VIEW[refTab];
+    var q = $('ref-q').value.trim().toLowerCase();
+    var all = rowsOf(S.ref[refTab]);
+    var hit = q ? all.filter(function (r) { return v.cols.some(function (c) { return String(r[c]).toLowerCase().indexOf(q) >= 0; }); }) : all;
+    var shown = hit.slice(0, 300);
+    $('ref-count').textContent = 'พบ ' + hit.length + ' รายการ' + (hit.length > shown.length ? ' (แสดง 300 รายการแรก พิมพ์ค้นหาเพื่อกรอง)' : '');
+    $('ref-table').innerHTML = '<tr>' + v.head.map(function (h) { return '<th>' + esc(h) + '</th>'; }).join('') + '</tr>' +
+      shown.map(function (r) { return '<tr>' + v.cols.map(function (c) { return '<td>' + esc(r[c]) + '</td>'; }).join('') + '</tr>'; }).join('');
+  }
+  $('ref-tabs').addEventListener('click', function (e) {
+    var t = e.target.getAttribute('data-tab'); if (!t) return;
+    refTab = t;
+    Array.prototype.forEach.call(this.querySelectorAll('button'), function (b) { b.classList.toggle('on', b === e.target); });
+    renderRef();
+  });
+  var qTimer;
+  $('ref-q').addEventListener('input', function () { clearTimeout(qTimer); qTimer = setTimeout(renderRef, 150); });
+
+  // ---------- ตัวเลือกบุคลากร ----------
+  function personLabel(p) { return p.person_id + ' · ' + p.full_name + ' — ' + (p.position_title || p.staff_type || ''); }
+  function fillPersonList() {
+    $('dl-person').innerHTML = rowsOf(S.ref.personnel).map(function (p) { return '<option value="' + esc(personLabel(p)) + '">'; }).join('');
+  }
+  function personIdFrom(val) { var m = String(val || '').match(/^(P\d{3,})/); return m ? m[1] : ''; }
+  function personById(id) { return rowsOf(S.ref.personnel).filter(function (p) { return p.person_id === id; })[0]; }
+
+  // ---------- ตั้งค่า ----------
+  var currentSetTab = 'users';
+  $('set-tabs').addEventListener('click', function (e) { var t = e.target.getAttribute('data-tab'); if (t) openSettings(t); });
+  function openSettings(tab) {
+    currentSetTab = tab;
+    Array.prototype.forEach.call(document.querySelectorAll('#set-tabs button'), function (b) { b.classList.toggle('on', b.getAttribute('data-tab') === tab); });
+    Array.prototype.forEach.call(document.querySelectorAll('.set-pane'), function (p) { p.hidden = p.id !== 'set-' + tab; });
+    if (tab === 'users') loadUsers();
+    if (tab === 'signers') renderSignerEdit();
+    if (tab === 'config') renderConfig();
+    if (tab === 'tools') renderPerf();
+  }
+
+  // ---------- แผงความเร็วของระบบ ----------
+  var FN_TH = { apiBootstrap: 'เปิดหน้าเว็บ (ข้อมูลอ้างอิง)', apiProcList: 'รายการงาน', apiProcGet: 'เปิดงาน', apiProcSave: 'บันทึก',
+    apiProcConfirm: 'ยืนยันขั้น', apiProcGenerate: 'ออกเอกสาร', apiProcLog: 'ประวัติงาน', apiProcPriceHistory: 'ราคาล่าสุด', apiProcMeta: 'กฎของระบบ',
+    apiProcSaveVendor: 'บันทึกผู้ขาย', apiProcAddDepartment: 'เพิ่มหน่วยงาน', apiProcVoid: 'ยกเลิกงาน' };
+  function perfRows() {
+    var g = {};
+    PERF.forEach(function (x) {
+      var r = g[x.fn] || (g[x.fn] = { fn: x.fn, n: 0, ms: 0, srv: 0, ns: 0, rd: 0, nr: 0, max: 0, last: null });
+      r.n++; r.ms += x.ms; if (x.ms > r.max) r.max = x.ms; r.last = x;
+      if (x.srv !== null) { r.srv += x.srv; r.ns++; }
+      if (x.rd !== null) { r.rd += x.rd; r.nr++; }
+    });
+    return Object.keys(g).map(function (k) { return g[k]; }).sort(function (a, b) { return b.last.at - a.last.at; });
+  }
+  function sec(ms) { return (ms / 1000).toFixed(1); }
+  function renderPerf() {
+    var rows = perfRows(), el = $('perf-out'); if (!el) return;
+    var head = 'เปิดหน้าเว็บครั้งนี้: ' + (S.perf.total ? sec(S.perf.total) + ' วินาที' : '—') + (S.perf.source ? ' · ' + esc(S.perf.source) : '') + ' · ระบบรุ่น ' + esc(S.appVersion || '');
+    if (!rows.length) { el.innerHTML = '<p>' + head + '</p><p class="muted">ยังไม่มีข้อมูล — ลองใช้หน้างานจัดซื้อสักพัก แล้วกลับมาดู</p>'; return; }
+    el.innerHTML = '<p>' + head + '</p><div class="tablewrap"><table><tr><th>คำสั่ง</th><th>ครั้ง</th><th>รวมเฉลี่ย (วิ)</th><th>ในเซิร์ฟเวอร์เฉลี่ย (วิ)</th><th>อ่านชีตเฉลี่ย (ครั้ง)</th><th>ช้าสุด (วิ)</th><th>ล่าสุด (วิ)</th></tr>' +
+      rows.map(function (r) {
+        return '<tr><td>' + esc(FN_TH[r.fn] || r.fn) + '</td><td>' + r.n + '</td><td><b>' + sec(r.ms / r.n) + '</b></td><td>' + (r.ns ? sec(r.srv / r.ns) : '—') + '</td><td>' +
+          (r.nr ? (r.rd / r.nr).toFixed(1) : '—') + '</td><td>' + sec(r.max) + '</td><td>' + sec(r.last.ms) + '</td></tr>';
+      }).join('') + '</table></div>';
+  }
+  function perfText() {
+    return ['ระบบรุ่น ' + (S.appVersion || '') + ' · เปิดหน้าเว็บ ' + (S.perf.total || '') + ' ms (' + (S.perf.source || '') + ')',
+      'คำสั่ง\tครั้ง\tรวมเฉลี่ยms\tเซิร์ฟเวอร์เฉลี่ยms\tอ่านชีตเฉลี่ย\tช้าสุดms']
+      .concat(perfRows().map(function (r) { return [r.fn, r.n, Math.round(r.ms / r.n), r.ns ? Math.round(r.srv / r.ns) : '', r.nr ? (r.rd / r.nr).toFixed(1) : '', r.max].join('\t'); }))
+      .concat(['', 'ล่าสุด 30 ครั้ง: เวลา\tคำสั่ง\tรวมms\tเซิร์ฟเวอร์ms\tอ่าน\tอ่านms\tเขียน\tflushms\topenms\tapi'])
+      .concat(PERF.slice(-30).map(function (x) { return [new Date(x.at).toLocaleTimeString('th-TH'), x.fn, x.ms, x.srv, x.rd, x.rdMs, x.wr, x.fl, x.op, (x.api || 0) + (x.apiErr ? ' ERR ' + x.apiErr : '')].join('\t'); })).join('\n');
+  }
+  $('perf-refresh').onclick = renderPerf;
+  $('perf-clear').onclick = function () { PERF = []; idb.set('perf', PERF); renderPerf(); toast('ล้างค่าแล้ว'); };
+  $('perf-copy').onclick = function () {
+    var t = perfText(), ta = $('perf-text');
+    ta.value = t; ta.hidden = false; ta.select();
+    var done = function () { toast('คัดลอกแล้ว — วางส่งให้ Claude ได้เลย'); };
+    try { if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(t).then(done, function () { document.execCommand('copy'); done(); }); return; } } catch (e) { /* ใช้วิธีเลือกข้อความแทน */ }
+    try { document.execCommand('copy'); done(); } catch (e) { toast('กด Ctrl+C เพื่อคัดลอกข้อความที่เลือกไว้'); }
+  };
+
+  // ผู้ใช้
+  $('u-roles').innerHTML = Object.keys(ROLE_TH).map(function (r) {
+    return '<label class="inline"><input type="checkbox" value="' + r + '"> ' + esc(ROLE_TH[r]) + '</label>';
+  }).join('');
+  function loadUsers() {
+    $('users-table').innerHTML = '<tr><td class="muted">กำลังโหลด…</td></tr>';
+    run('apiAdminListUsers').then(function (d) {
+      $('users-table').innerHTML = '<tr><th>อีเมล</th><th>ชื่อ</th><th>บทบาท</th><th>ใช้งาน</th><th>แก้ล่าสุด</th></tr>' + d.users.map(function (u, i) {
+        return '<tr class="clickable" data-i="' + i + '"><td>' + esc(u.email) + '</td><td>' + esc(u.display_name) + '</td><td>' +
+          String(u.roles).split(',').map(function (r) { return '<span class="chip">' + esc(ROLE_TH[r.trim()] || r) + '</span>'; }).join('') +
+          '</td><td>' + (String(u.active).toUpperCase() === 'FALSE' ? 'ไม่' : 'ใช่') + '</td><td class="small muted">' + esc(u.updated_at) + '</td></tr>';
+      }).join('');
+      $('users-table').onclick = function (e) {
+        var tr = e.target.closest('tr[data-i]'); if (!tr) return;
+        var u = d.users[Number(tr.getAttribute('data-i'))];
+        $('u-email').value = u.email;
+        var p = personById(u.person_id); $('u-person').value = p ? personLabel(p) : '';
+        var roles = String(u.roles).split(',').map(function (s) { return s.trim(); });
+        Array.prototype.forEach.call($('u-roles').querySelectorAll('input'), function (c) { c.checked = roles.indexOf(c.value) >= 0; });
+        $('u-active').checked = String(u.active).toUpperCase() !== 'FALSE';
+        $('u-note').value = u.note || '';
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      };
+    }).catch(function (e) { $('users-table').innerHTML = ''; toast(e.message, true); });
+  }
+  $('u-clear').onclick = function () {
+    ['u-email', 'u-person', 'u-note'].forEach(function (id) { $(id).value = ''; });
+    Array.prototype.forEach.call($('u-roles').querySelectorAll('input'), function (c) { c.checked = c.value === 'viewer'; });
+    $('u-active').checked = true;
+  };
+  $('u-save').onclick = function () {
+    var btn = this;
+    var roles = Array.prototype.filter.call($('u-roles').querySelectorAll('input'), function (c) { return c.checked; }).map(function (c) { return c.value; });
+    var pid = personIdFrom($('u-person').value);
+    if ($('u-person').value && !pid) { toast('เลือกบุคลากรจากรายการที่แสดง', true); return; }
+    busy(btn, true);
+    run('apiAdminSaveUser', { email: $('u-email').value, person_id: pid, roles: roles, active: $('u-active').checked, note: $('u-note').value })
+      .then(function (r) { toast(r.result === 'insert' ? 'เพิ่มผู้ใช้แล้ว' : 'บันทึกแล้ว'); loadUsers(); })
+      .catch(function (e) { toast(e.message, true); })
+      .then(function () { busy(btn, false); });
+  };
+
+  // ผู้ลงนาม
+  function renderSignerEdit() {
+    var canEdit = has('admin') || has('head');
+    $('signers-edit').innerHTML = rowsOf(S.ref.signers).map(function (s) {
+      var p = personById(s.person_id);
+      return '<div class="sig-row" data-key="' + esc(s.sign_key) + '"><div><b>' + esc(s.sign_label) + '</b><div class="muted small">' + esc(s.sign_key) + '</div></div>' +
+        '<input class="sig-person" list="dl-person" value="' + esc(p ? personLabel(p) : s.person_id) + '"' + (canEdit ? '' : ' disabled') + '>' +
+        '<input class="sig-title" placeholder="ตำแหน่งที่พิมพ์ในเอกสาร (ว่าง = ตามบทบาท)" value="' + esc(s.title_override || '') + '"' + (canEdit ? '' : ' disabled') + '>' +
+        (canEdit ? '<button class="sig-save">บันทึก</button>' : '') + '</div>';
+    }).join('');
+    $('signers-edit').onclick = function (e) {
+      if (!e.target.classList.contains('sig-save')) return;
+      var row = e.target.closest('.sig-row'), btn = e.target;
+      var pid = personIdFrom(row.querySelector('.sig-person').value);
+      if (!pid) { toast('เลือกบุคลากรจากรายการที่แสดง', true); return; }
+      busy(btn, true);
+      run('apiAdminSaveSigner', { sign_key: row.getAttribute('data-key'), person_id: pid, title_override: row.querySelector('.sig-title').value })
+        .then(function () { toast('บันทึกผู้ลงนามแล้ว'); return refresh(); })
+        .catch(function (e2) { toast(e2.message, true); })
+        .then(function () { busy(btn, false); });
+    };
+  }
+
+  // ค่าระบบ
+  var DEFAULTS = [
+    ['default_delivery_days', 'กำหนดส่งมอบ (วัน)'], ['default_price_validity_days', 'ยืนราคา (วัน)'],
+    ['default_contract_sign_days', 'ให้มาทำสัญญาภายใน (วัน)'], ['default_repair_days', 'ซ่อมแซมภายใน (วัน)'],
+    ['default_penalty_rate', 'ค่าปรับรายวัน (ร้อยละ)'], ['default_inspect_committee_size', 'จำนวนกรรมการตรวจรับ'],
+    ['fiscal_year_current', 'ปีงบประมาณปัจจุบัน']
+  ];
+  function renderConfig() {
+    var c = S.ref.config;
+    Array.prototype.forEach.call(document.querySelectorAll('input[name=ns]'), function (r) { r.checked = r.value === (c.number_style || 'thai'); });
+    $('defaults').innerHTML = DEFAULTS.map(function (d) {
+      return '<label>' + esc(d[1]) + '<input data-key="' + d[0] + '" value="' + esc(c[d[0]] || '') + '" inputmode="decimal"></label>';
+    }).join('');
+    previewNs();
+  }
+  function selectedNs() { var r = document.querySelector('input[name=ns]:checked'); return r ? r.value : 'thai'; }
+  function previewNs() {
+    $('ns-preview').innerHTML = '<span class="muted">กำลังสร้างตัวอย่าง…</span>';
+    run('apiPreviewFormats', selectedNs()).then(function (p) {
+      $('ns-preview').innerHTML = [
+        ['ยอดเงิน', p.money + ' บาท (' + p.text + ')'], ['ก่อน VAT / VAT', p.beforeVat + ' / ' + p.vat],
+        ['เลขที่', p.docNo], ['วันที่ D1', p.d1], ['วันที่ D2', p.d2], ['วันที่ D3', p.d3], ['วันที่ D4', p.d4]
+      ].map(function (x) { return '<div><span class="muted">' + esc(x[0]) + ':</span> ' + esc(x[1]) + '</div>'; }).join('');
+    }).catch(function (e) { $('ns-preview').textContent = e.message; });
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('input[name=ns]'), function (r) { r.addEventListener('change', previewNs); });
+  $('ns-save').onclick = function () {
+    var btn = this; busy(btn, true);
+    run('apiAdminSetConfig', 'number_style', selectedNs()).then(function () { toast('บันทึกรูปแบบตัวเลขแล้ว'); return refresh(); })
+      .catch(function (e) { toast(e.message, true); }).then(function () { busy(btn, false); });
+  };
+  $('def-save').onclick = function () {
+    var btn = this; busy(btn, true);
+    var inputs = Array.prototype.slice.call($('defaults').querySelectorAll('input'));
+    var chain = Promise.resolve();
+    inputs.forEach(function (i) {
+      if (String(S.ref.config[i.getAttribute('data-key')] || '') === i.value) return;
+      chain = chain.then(function () { return run('apiAdminSetConfig', i.getAttribute('data-key'), i.value); });
+    });
+    chain.then(function () { toast('บันทึกค่าเริ่มต้นแล้ว'); return refresh(); })
+      .catch(function (e) { toast(e.message, true); }).then(function () { busy(btn, false); });
+  };
+
+  // เครื่องมือ
+  $('t-import').onclick = function () {
+    var btn = this; busy(btn, true);
+    run('apiAdminImportLegacy').then(function (r) { toast('นำเข้าใหม่: หมวด ' + r.category + ', พัสดุ ' + r.item + ', ผู้ขาย ' + r.vendor); return refresh(); })
+      .catch(function (e) { toast(e.message, true); }).then(function () { busy(btn, false); });
+  };
+  $('t-sync').onclick = function () {
+    var btn = this; busy(btn, true);
+    run('apiAdminSyncTeacherView').then(function (r) { toast('อัปเดตมุมมองครูแล้ว (บุคลากร ' + r['บุคลากร'] + ' แถว)'); })
+      .catch(function (e) { toast(e.message, true); }).then(function () { busy(btn, false); });
+  };
+  function testDocs(btn, style) {
+    busy(btn, true); $('t-docs-out').textContent = 'กำลังสร้างเอกสาร… (ประมาณ 20–40 วินาที)';
+    run('apiAdminTestDocs', style).then(function (r) {
+      $('t-docs-out').innerHTML = 'สร้างแล้ว ' + r.count + ' ไฟล์ + ชุดรวม (เลข' + (r.style === 'arabic' ? 'อารบิก' : 'ไทย') + ') — <a target="_blank" href="' + esc(r.folderUrl) + '">เปิดโฟลเดอร์</a>' +
+        (r.missing.length ? '<br>⚠ ไม่มีค่า: ' + esc(r.missing.join(' | ')) : '');
+    }).catch(function (e) { $('t-docs-out').textContent = ''; toast(e.message, true); }).then(function () { busy(btn, false); });
+  }
+  $('t-docs').onclick = function () { testDocs(this, ''); };
+  $('t-docs-ar').onclick = function () { testDocs(this, 'arabic'); };
+  $('t-clear').onclick = function () {
+    idb.clear().then(function () { toast('ล้างแคชแล้ว กำลังโหลดใหม่…'); S.ref = null; S.perf = {}; currentPage = 'home'; boot(); });
+  };
+
+  /** ดึงข้อมูลอ้างอิงใหม่หลังมีการแก้ */
+  function refresh() {
+    return run('apiBootstrap', '').then(function (d) {
+      if (d.denied) return;
+      S.user = d.user; S.ref = d.ref; S.key = d.key;
+      idb.set('boot', { key: d.key, ref: d.ref, user: d.user });
+      fillPersonList();
+      if (currentPage === 'settings') openSettings(currentSetTab); else go(currentPage);
+    });
+  }
+
+  // ให้หน้างานจัดซื้อ (ProcUI) ใช้เครื่องมือชุดเดียวกัน
+  window.App = { $: $, esc: esc, run: run, toast: toast, rowsOf: rowsOf, has: has, S: S, idb: idb, go: function (p) { go(p); } };
+
+  boot();
+})();
+</script>

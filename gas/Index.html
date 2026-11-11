@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
+  <?!= include('Styles') ?>
+  <?!= include('ProcStyles') ?>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <div class="brand-name">ระบบจัดซื้อพัสดุและครุภัณฑ์</div>
+      <div class="brand-sub">โรงเรียนห้องสอนศึกษา ในพระอุปถัมภ์ฯ · v<?= appVersion ?></div>
+    </div>
+    <div id="who" class="who">กำลังตรวจสอบผู้ใช้…</div>
+  </header>
+
+  <nav id="nav" class="nav" hidden>
+    <button data-page="home" class="on">หน้าแรก</button>
+    <button data-page="proc">งานจัดซื้อ</button>
+    <button data-page="ref">ข้อมูลอ้างอิง</button>
+    <button data-page="settings" data-role="admin">ตั้งค่า</button>
+  </nav>
+
+  <main>
+    <section id="page-loading" class="page">
+      <div class="loading"><div class="spinner"></div><div>กำลังโหลดข้อมูล…</div></div>
+    </section>
+
+    <section id="page-denied" class="page" hidden>
+      <div class="card warn">
+        <h2>ไม่มีสิทธิ์เข้าใช้ระบบ</h2>
+        <p>กรุณาเข้าสู่ระบบด้วยบัญชี Google ของโรงเรียน (@hongson.ac.th) แล้วเปิดหน้านี้ใหม่</p>
+        <p class="muted" id="denied-email"></p>
+      </div>
+    </section>
+
+    <section id="page-home" class="page" hidden>
+      <div class="grid stats" id="stats"></div>
+      <div class="grid two">
+        <div class="card">
+          <h3>บัญชีของคุณ</h3>
+          <div id="me"></div>
+        </div>
+        <div class="card">
+          <h3>สถานะการโหลด</h3>
+          <div id="perf" class="perf"></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>ผู้ลงนามตามบทบาท (ใช้ในทุกเอกสาร)</h3>
+        <div id="signers-view"></div>
+      </div>
+      <div class="card muted small">
+        เฟส 2: เมนู <b>งานจัดซื้อ</b> — สร้างงาน กรอกทีละขั้น ออกเลขที่และเอกสาร Word ได้ในที่เดียว · การลงบัญชีรับ-จ่ายจะมาในเฟส 3
+      </div>
+    </section>
+
+    <section id="page-proc" class="page" hidden></section>
+
+    <section id="page-ref" class="page" hidden>
+      <div class="tabs" id="ref-tabs">
+        <button data-tab="personnel" class="on">บุคลากร</button>
+        <button data-tab="items">รายการพัสดุ</button>
+        <button data-tab="vendors">ผู้ขาย</button>
+        <button data-tab="departments">กลุ่มงาน</button>
+      </div>
+      <div class="card">
+        <input id="ref-q" class="search" type="search" placeholder="ค้นหา… (ชื่อ, รหัส, หน่วยงาน)">
+        <div id="ref-count" class="muted small"></div>
+        <div class="table-wrap"><table id="ref-table"></table></div>
+      </div>
+    </section>
+
+    <section id="page-settings" class="page" hidden>
+      <div class="tabs" id="set-tabs">
+        <button data-tab="users" class="on">ผู้ใช้และบทบาท</button>
+        <button data-tab="signers">ผู้ลงนาม</button>
+        <button data-tab="config">ค่าระบบ</button>
+        <button data-tab="tools">เครื่องมือ</button>
+      </div>
+
+      <div class="set-pane" id="set-users">
+        <div class="card">
+          <h3>เพิ่ม / แก้ไขผู้ใช้</h3>
+          <div class="form">
+            <label>อีเมล @hongson.ac.th<input id="u-email" type="email" placeholder="ชื่อ@hongson.ac.th"></label>
+            <label>บุคลากร<input id="u-person" list="dl-person" placeholder="พิมพ์ชื่อหรือรหัส แล้วเลือก"></label>
+            <div class="roles" id="u-roles"></div>
+            <label class="inline"><input id="u-active" type="checkbox" checked> ใช้งาน</label>
+            <label>หมายเหตุ<input id="u-note"></label>
+            <div class="actions"><button class="primary" id="u-save">บันทึก</button><button id="u-clear">ล้างฟอร์ม</button></div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>รายชื่อผู้ใช้</h3>
+          <p class="muted small">ครูในโดเมนโรงเรียนที่ไม่มีชื่อในตารางนี้ จะเข้าได้ในบทบาท "ครูทั่วไป" (ดูอย่างเดียว)</p>
+          <div class="table-wrap"><table id="users-table"></table></div>
+        </div>
+      </div>
+
+      <div class="set-pane" id="set-signers" hidden>
+        <div class="card">
+          <h3>ผู้ลงนามตามบทบาท</h3>
+          <p class="muted small">เปลี่ยนคนได้เมื่อมีคำสั่งมอบหมายงานใหม่ เอกสารที่ออกหลังจากนี้จะใช้ชื่อใหม่ทันที</p>
+          <div id="signers-edit"></div>
+        </div>
+      </div>
+
+      <div class="set-pane" id="set-config" hidden>
+        <div class="card">
+          <h3>รูปแบบตัวเลขในเอกสาร</h3>
+          <div class="radio-row">
+            <label class="inline"><input type="radio" name="ns" value="thai"> เลขไทยทั้งเอกสาร</label>
+            <label class="inline"><input type="radio" name="ns" value="arabic"> เลขอารบิกทั้งเอกสาร</label>
+          </div>
+          <div id="ns-preview" class="preview"></div>
+          <div class="actions"><button class="primary" id="ns-save">บันทึกรูปแบบตัวเลข</button></div>
+        </div>
+        <div class="card">
+          <h3>ค่าเริ่มต้นของงานจัดซื้อ</h3>
+          <div class="form cols" id="defaults"></div>
+          <div class="actions"><button class="primary" id="def-save">บันทึกค่าเริ่มต้น</button></div>
+        </div>
+      </div>
+
+      <div class="set-pane" id="set-tools" hidden>
+        <div class="card">
+          <h3>เครื่องมือผู้ดูแล</h3>
+          <div class="tool"><div><b>นำเข้าข้อมูลจากระบบเดิม</b><div class="muted small">หมวด/รายการพัสดุ/ผู้ขาย — อ่านอย่างเดียว เพิ่มเฉพาะรายการใหม่</div></div><button id="t-import">นำเข้า</button></div>
+          <div class="tool"><div><b>อัปเดตไฟล์มุมมองครู</b><div class="muted small">ปกติระบบทำให้ทุกคืน</div></div><button id="t-sync">อัปเดตตอนนี้</button></div>
+          <div class="tool"><div><b>ออกชุดเอกสารทดสอบ (งานโดรน 13/2570)</b><div class="muted small">สร้าง .docx ครบ 12 แบบ + ชุดรวม ในโฟลเดอร์ "_ทดสอบระบบ (ลบได้)" — ไม่บันทึกงาน ไม่ใช้เลขที่จริง</div><div id="t-docs-out" class="small"></div></div><div class="actions" style="margin:0"><button id="t-docs">เลขตามค่าระบบ</button><button id="t-docs-ar">เลขอารบิก</button></div></div>
+          <div class="tool"><div><b>ล้างแคชในเครื่องนี้</b><div class="muted small">ใช้เมื่อข้อมูลบนหน้าจอดูไม่ตรงกับในชีต</div></div><button id="t-clear">ล้างแคช</button></div>
+        </div>
+        <div class="card">
+          <h3>ความเร็วของระบบ</h3>
+          <p class="muted small">เวลาของแต่ละคำสั่ง (ล่าสุด 300 ครั้งในเครื่องนี้) — <b>รวม</b> = ตั้งแต่กดจนได้ผล, <b>ในเซิร์ฟเวอร์</b> = เวลาที่ Apps Script ทำงานจริง ส่วนต่างคือเวลาเดินทางและปลุกเซิร์ฟเวอร์</p>
+          <div id="perf-out" class="small"></div>
+          <textarea id="perf-text" hidden rows="6" style="width:100%;font-family:monospace;font-size:12px"></textarea>
+          <div class="actions"><button id="perf-refresh">รีเฟรช</button><button class="primary" id="perf-copy">คัดลอกผลเพื่อส่งให้ Claude</button><button id="perf-clear">ล้างค่า</button></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <datalist id="dl-person"></datalist>
+  <div id="toast" class="toast" hidden></div>
+  <?!= include('Client') ?>
+  <?!= include('ProcUI') ?>
+</body>
+</html>

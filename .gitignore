@@ -1,0 +1,10 @@
+node_modules/
+dist/
+out/
+# เทมเพลต .docx อยู่ใน Google Drive (โฟลเดอร์ 03 เทมเพลต) ไม่เก็บใน repo สาธารณะ
+templates/
+*.docx
+# ไฟล์ส่วนตัว/ข้อมูลจริง ห้ามขึ้น repo
+private/
+*.local.json
+.env

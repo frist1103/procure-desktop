@@ -1,0 +1,10 @@
+{
+  "name": "procure-desktop",
+  "version": "0.3.3",
+  "private": true,
+  "description": "ระบบจัดซื้อพัสดุและครุภัณฑ์ — Google Apps Script + โปรแกรมติดตั้ง (Electron)",
+  "scripts": {
+    "test": "node test/thai.test.js && node test/mock.test.js",
+    "test:full": "node test/thai.test.js && node test/mock.test.js && node test/proc.test.js templates out/proc && node test/replace22.test.js templates out/replace && node test/docgen.mock.test.js templates out/docgen"
+  }
+}
